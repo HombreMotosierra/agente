@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.env
+.env.*
+.venv/
+venv/
+build/
+dist/
+
+# Local runtime data and personal settings
+agente_ia_data/
+api.txt
+
+# Windows noise
+Thumbs.db
+Desktop.ini

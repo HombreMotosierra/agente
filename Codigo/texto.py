@@ -83,6 +83,17 @@ NEGATIVE_PATTERNS = (
 )
 
 
+def normalizar_proveedor_ia(valor):
+    v = str(valor or "").strip().lower()
+    if v in ("api", "online", "remoto", "remota"):
+        return "online"
+    return "local"
+
+
+def proveedor_ui_value(valor):
+    return "api" if normalizar_proveedor_ia(valor) == "online" else "local"
+
+
 def cargar_config():
     if not CONFIG_PATH.exists():
         guardar_config(DEFAULT_CONFIG)
@@ -93,6 +104,7 @@ def cargar_config():
 
     cfg = DEFAULT_CONFIG.copy()
     cfg.update(data)
+    cfg["proveedor_ia"] = normalizar_proveedor_ia(cfg.get("proveedor_ia"))
     return cfg
 
 
@@ -104,6 +116,46 @@ def guardar_config(config):
 CONFIG = cargar_config()
 ULTIMA_SOLICITUD_USUARIO = ""
 escucha_activa = False
+root = None
+chat_window = None
+style = None
+estado_var = None
+header = None
+titulo = None
+tts_estado = None
+model_var = None
+combo_model = None
+provider_var = None
+combo_provider = None
+online_model_var = None
+combo_online_model = None
+mic_var = None
+combo_mic = None
+voz_style_var = None
+combo_voz_style = None
+voz_speed_var = None
+combo_voz_speed = None
+voz_var = None
+chk_voz = None
+skills_auto_var = None
+chk_skills_auto = None
+btn_compacto = None
+btn_guardar = None
+btn_habilidades = None
+btn_automatizaciones = None
+btn_integraciones = None
+btn_key = None
+frame_chat = None
+canvas = None
+scrollable_frame = None
+frame_input = None
+entrada = None
+btn_limpiar = None
+btn_micro = None
+btn_refresh_mic = None
+btn_enviar = None
+chat_compacto = False
+auto_compact_job = None
 
 
 def normalizar_window_size(size):
@@ -754,7 +806,7 @@ tts_status_var = None
 
 
 def set_tts_status(texto):
-    if tts_status_var is not None:
+    if tts_status_var is not None and chat_window is not None:
         chat_window.after(0, lambda: tts_status_var.set(texto))
 
 
@@ -861,6 +913,13 @@ def hablar(texto, esperar=False):
     if not texto.strip():
         return
     voz_queue.put(texto)
+
+
+def hablar_garantizado(texto):
+    try:
+        hablar(texto)
+    except Exception:
+        pass
 
 
 def configurar_voz(estilo=None, velocidad=None, volumen=None, genero=None):
@@ -1510,6 +1569,8 @@ def comando_requiere_confirmacion(cmd):
 
 
 def confirmar_comando_destructivo(cmd):
+    if chat_window is None:
+        return False
     resultado = {"ok": False}
     evento = threading.Event()
 
@@ -1668,7 +1729,7 @@ Usuario:
 {prompt}
 """
 
-    proveedor = CONFIG.get("proveedor_ia", "local")
+    proveedor = normalizar_proveedor_ia(CONFIG.get("proveedor_ia", "local"))
     if proveedor == "online":
         return chat_online_groq(
             "Eres un asistente técnico preciso. Debes responder en JSON válido.",
@@ -1746,24 +1807,9 @@ def ejecutar_acciones(lista):
 # ========================
 # UI - VENTANA MINIMALISTA
 # ========================
-root = tk.Tk()
-chat_window = root
-chat_window.title("Agente IA")
-chat_window.geometry(
-    f"{CONFIG['window_size']}+{CONFIG.get('window_x', 1000)}+{CONFIG.get('window_y', 140)}"
-)
-chat_window.configure(bg="#060d1f")
-chat_window.minsize(320, 420)
-
-style = ttk.Style()
-style.theme_use("clam")
-style.configure("TCombobox", fieldbackground="#111827", foreground="white", arrowsize=13)
-
-chat_compacto = False
-auto_compact_job = None
-
-
 def cerrar_app():
+    if chat_window is None:
+        return
     try:
         CONFIG["window_size"] = chat_window.geometry().split("+")[0]
         CONFIG["window_x"] = chat_window.winfo_x()
@@ -1773,126 +1819,7 @@ def cerrar_app():
         chat_window.destroy()
 
 
-# Header minimalista
-header = tk.Frame(chat_window, bg="#0f172a", height=48)
-header.pack(fill="x")
-
-titulo = tk.Label(
-    header,
-    text="Asistente IA",
-    bg="#0f172a",
-    fg="#e2e8f0",
-    font=("Segoe UI Semibold", 11),
-)
-titulo.pack(side="left", padx=10)
-
-estado_var = tk.StringVar(value="Listo")
-estado = tk.Label(
-    header, textvariable=estado_var, bg="#0f172a", fg="#94a3b8", font=("Segoe UI", 9)
-)
-estado.pack(side="left")
-
-tts_status_var = tk.StringVar(value="🛑 silencio")
-tts_estado = tk.Label(
-    header,
-    textvariable=tts_status_var,
-    bg="#0f172a",
-    fg="#60a5fa",
-    font=("Segoe UI", 9),
-)
-tts_estado.pack(side="left", padx=8)
-
-model_var = tk.StringVar(value=CONFIG["model"])
-combo_model = ttk.Combobox(
-    header,
-    textvariable=model_var,
-    values=["qwen2.5:7b", "llama3.1:8b", "mistral:7b", "phi3:mini"],
-    width=12,
-    state="readonly",
-)
-combo_model.pack(side="right", padx=8, pady=8)
-
-provider_var = tk.StringVar(value=CONFIG.get("proveedor_ia", "local"))
-combo_provider = ttk.Combobox(
-    header,
-    textvariable=provider_var,
-    values=["local", "online"],
-    width=8,
-    state="readonly",
-)
-combo_provider.pack(side="right", padx=4, pady=8)
-
-online_model_var = tk.StringVar(value=CONFIG.get("modelo_online", "llama-3.1-8b-instant"))
-combo_online_model = ttk.Combobox(
-    header,
-    textvariable=online_model_var,
-    values=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
-    width=22,
-    state="readonly",
-)
-combo_online_model.pack(side="right", padx=4, pady=8)
-
-mic_names = listar_microfonos()
-mic_var = tk.StringVar(value=CONFIG.get("voz_entrada_microfono", ""))
-combo_mic = ttk.Combobox(
-    header,
-    textvariable=mic_var,
-    values=mic_names,
-    width=26,
-    state="readonly" if mic_names else "disabled",
-)
-if not mic_var.get() and mic_names:
-    mic_var.set(mic_names[0])
-combo_mic.pack(side="right", padx=4, pady=8)
-
-voz_style_var = tk.StringVar(value=CONFIG.get("voz_style", "Natural"))
-combo_voz_style = ttk.Combobox(
-    header,
-    textvariable=voz_style_var,
-    values=["Natural", "Suave", "Profunda", "Femenina", "Masculina"],
-    width=10,
-    state="readonly",
-)
-combo_voz_style.pack(side="right", padx=4, pady=8)
-
-voz_speed_var = tk.StringVar(value=CONFIG.get("voz_speed_label", "Normal"))
-combo_voz_speed = ttk.Combobox(
-    header,
-    textvariable=voz_speed_var,
-    values=["Lenta", "Normal", "Rápida"],
-    width=8,
-    state="readonly",
-)
-combo_voz_speed.pack(side="right", padx=4, pady=8)
-
-voz_var = tk.BooleanVar(value=CONFIG["voz_activa"])
-chk_voz = tk.Checkbutton(
-    header,
-    text="Voz",
-    variable=voz_var,
-    command=None,
-    bg="#0f172a",
-    fg="#cbd5e1",
-    selectcolor="#1f2937",
-    activebackground="#0f172a",
-    activeforeground="#cbd5e1",
-    font=("Segoe UI", 9),
-)
-chk_voz.pack(side="right")
-
-skills_auto_var = tk.BooleanVar(value=bool(CONFIG.get("usar_habilidades_auto", False)))
-chk_skills_auto = tk.Checkbutton(
-    header,
-    text="AutoSkills",
-    variable=skills_auto_var,
-    bg="#0f172a",
-    fg="#cbd5e1",
-    selectcolor="#1f2937",
-    activebackground="#0f172a",
-    activeforeground="#cbd5e1",
-    font=("Segoe UI", 9),
-)
-chk_skills_auto.pack(side="right", padx=4)
+# La interfaz se crea de forma explícita en configurar_interfaz().
 
 
 def on_voice_ui_change(_event=None):
@@ -1907,10 +1834,10 @@ def on_voice_ui_change(_event=None):
 
 
 def on_provider_change(_event=None):
-    CONFIG["proveedor_ia"] = provider_var.get()
+    CONFIG["proveedor_ia"] = normalizar_proveedor_ia(provider_var.get())
     CONFIG["modelo_online"] = online_model_var.get()
     guardar_config(CONFIG)
-    estado_var.set(f"Proveedor: {CONFIG['proveedor_ia']}")
+    estado_var.set(f"Proveedor fijo: {proveedor_ui_value(CONFIG['proveedor_ia'])}")
     chat_window.after(1200, lambda: estado_var.set("Listo"))
 
 
@@ -1921,9 +1848,6 @@ def on_toggle_voz():
         set_tts_status("🛑 silencio")
     else:
         set_tts_status("🔇 voz desactivada")
-
-
-chk_voz.configure(command=on_toggle_voz)
 
 
 def alternar_compacto():
@@ -1940,23 +1864,12 @@ def alternar_compacto():
         )
         btn_compacto.configure(text="▣")
 
-
-btn_compacto = tk.Button(
-    header,
-    text="▣",
-    command=alternar_compacto,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=7,
-)
-btn_compacto.pack(side="right", padx=4)
-
-
-
 def guardar_preferencias():
     CONFIG["model"] = model_var.get()
+    CONFIG["proveedor_ia"] = normalizar_proveedor_ia(provider_var.get())
+    CONFIG["modelo_online"] = online_model_var.get()
     CONFIG["voz_activa"] = bool(voz_var.get())
+    CONFIG["usar_habilidades_auto"] = bool(skills_auto_var.get())
     CONFIG["window_size"] = chat_window.geometry().split("+")[0]
     CONFIG["window_x"] = chat_window.winfo_x()
     CONFIG["window_y"] = chat_window.winfo_y()
@@ -2500,81 +2413,9 @@ def abrir_panel_automatizaciones():
 
     cargar_tabla()
 
-
-btn_guardar = tk.Button(
-    header,
-    text="Guardar",
-    command=guardar_preferencias,
-    bg="#1d4ed8",
-    fg="#f8fafc",
-    relief="flat",
-    padx=10,
-)
-btn_guardar.pack(side="right", padx=6)
-
-btn_habilidades = tk.Button(
-    header,
-    text="Habilidades",
-    command=abrir_panel_habilidades,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_habilidades.pack(side="right", padx=6)
-
-btn_automatizaciones = tk.Button(
-    header,
-    text="Automatizaciones",
-    command=abrir_panel_automatizaciones,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_automatizaciones.pack(side="right", padx=6)
-
-btn_integraciones = tk.Button(
-    header,
-    text="Integraciones",
-    command=abrir_panel_integraciones,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_integraciones.pack(side="right", padx=6)
-
-btn_key = tk.Button(
-    header,
-    text="Groq Key",
-    command=pedir_api_key_groq,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_key.pack(side="right", padx=6)
-
-frame_chat = tk.Frame(chat_window, bg="#030712")
-frame_chat.pack(fill="both", expand=True)
-
-canvas = tk.Canvas(frame_chat, bg="#030712", highlightthickness=0)
-scrollbar = ttk.Scrollbar(
-    frame_chat, orient="vertical", style="Vertical.TScrollbar", command=canvas.yview
-)
-scrollable_frame = tk.Frame(canvas, bg="#030712")
-
-scrollable_frame.bind(
-    "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-)
-canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-canvas.configure(yscrollcommand=scrollbar.set)
-canvas.pack(side="left", fill="both", expand=True)
-scrollbar.pack(side="right", fill="y")
-
-
 def mensaje(texto, tipo):
+    if scrollable_frame is None or chat_window is None or canvas is None:
+        return
     frame = tk.Frame(scrollable_frame, bg="#030712")
 
     if tipo == "user":
@@ -2604,22 +2445,9 @@ def mensaje(texto, tipo):
     chat_window.update_idletasks()
     canvas.yview_moveto(1)
 
-
-frame_input = tk.Frame(chat_window, bg="#030712")
-frame_input.pack(fill="x")
-
-entrada = tk.Entry(
-    frame_input,
-    bg="#111827",
-    fg="#e2e8f0",
-    insertbackground="#e2e8f0",
-    font=("Segoe UI", 11),
-    relief="flat",
-)
-entrada.pack(side="left", fill="x", expand=True, padx=10, pady=10, ipady=5)
-
-
 def guardar_geometria_actual():
+    if chat_window is None:
+        return
     CONFIG["window_size"] = normalizar_window_size(chat_window.geometry().split("+")[0])
     CONFIG["window_x"] = chat_window.winfo_x()
     CONFIG["window_y"] = chat_window.winfo_y()
@@ -2628,6 +2456,8 @@ def guardar_geometria_actual():
 
 def programar_auto_compacto():
     global auto_compact_job
+    if chat_window is None:
+        return
     if auto_compact_job:
         chat_window.after_cancel(auto_compact_job)
     auto_compact_job = chat_window.after(18000, lambda: compactar_si_inactivo())
@@ -2635,6 +2465,8 @@ def programar_auto_compacto():
 
 def compactar_si_inactivo():
     global chat_compacto, auto_compact_job
+    if chat_window is None:
+        return
     auto_compact_job = None
     if chat_window.focus_displayof() is None and not chat_compacto:
         chat_compacto = True
@@ -2647,6 +2479,8 @@ def compactar_si_inactivo():
 
 def expandir_si_compacto():
     global chat_compacto
+    if chat_window is None:
+        return
     if chat_compacto:
         chat_compacto = False
         chat_window.geometry(
@@ -2658,33 +2492,11 @@ def expandir_si_compacto():
 
 def limpiar_historial():
     limpiar_historial_db()
+    if scrollable_frame is None:
+        return
     for w in scrollable_frame.winfo_children():
         w.destroy()
     mensaje("Historial limpiado.", "system")
-
-
-btn_limpiar = tk.Button(
-    frame_input,
-    text="Limpiar",
-    command=limpiar_historial,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_limpiar.pack(side="left", padx=5)
-
-btn_micro = tk.Button(
-    frame_input,
-    text="🎤",
-    command=None,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_micro.pack(side="left", padx=5)
-
 
 def resolver_ruta_alias(texto):
     t = texto.lower()
@@ -3062,7 +2874,7 @@ Historial:
 Solicitud:
 {texto}
 """
-    proveedor = CONFIG.get("proveedor_ia", "local")
+    proveedor = normalizar_proveedor_ia(CONFIG.get("proveedor_ia", "local"))
     if proveedor == "online":
         contenido = chat_online_groq(
             "Eres un planner de acciones. Devuelves JSON válido estricto.",
@@ -3084,6 +2896,227 @@ Solicitud:
     except json.JSONDecodeError:
         pass
     return "", []
+
+
+def _resultado_es_fallido(linea):
+    s = (linea or "").lower()
+    patrones = (
+        "error",
+        "no pude",
+        "no tengo",
+        "ruta no encontrada",
+        "url inválida",
+        "url invalida",
+        "api.example.com",
+        "failed",
+        "max retries exceeded",
+    )
+    return any(p in s for p in patrones)
+
+
+def procesar_prompt_sync(texto):
+    global ULTIMA_SOLICITUD_USUARIO
+
+    solicitud_original = (texto or "").strip()
+    if not solicitud_original:
+        return "prompt vacio"
+
+    guardar_mensaje_db("user", solicitud_original)
+
+    texto_l = solicitud_original.lower()
+    tipo_tiempo = detectar_consulta_fecha_hora(solicitud_original)
+    intencion = detectar_intencion_principal(solicitud_original)
+
+    if not any(k in texto_l for k in ("aprende", "aprendelo", "apréndelo")):
+        ULTIMA_SOLICITUD_USUARIO = solicitud_original
+
+    if tipo_tiempo:
+        cache_key = f"fecha_hora::{tipo_tiempo}::{normalizar_texto_cache(solicitud_original)}"
+        ttl_seg = 10 if tipo_tiempo in ("hora", "fecha_hora") else 24 * 3600
+        respuesta_cache = obtener_cache_respuesta(cache_key, max_age_seconds=ttl_seg)
+        respuesta_final = respuesta_cache or formatear_fecha_hora_bonita(tipo_tiempo)
+        if not respuesta_cache:
+            guardar_cache_respuesta(cache_key, respuesta_final)
+        guardar_mensaje_db("assistant", respuesta_final)
+        registrar_ejecucion(solicitud_original, respuesta_final)
+        return respuesta_final
+
+    if intencion == "general":
+        resp_local = respuesta_conversacional_local(solicitud_original)
+        if resp_local:
+            guardar_mensaje_db("assistant", resp_local)
+            registrar_ejecucion(solicitud_original, resp_local)
+            return resp_local
+
+    if any(k in texto_l for k in ("aprende a hacerlo", "aprende hacerlo", "aprendelo", "apréndelo")):
+        if not ULTIMA_SOLICITUD_USUARIO:
+            respuesta_final = "No tengo una solicitud previa para aprender. Dame primero una tarea concreta."
+        else:
+            acciones_aprendidas = acciones_locales_desde_texto(ULTIMA_SOLICITUD_USUARIO)
+            if not acciones_aprendidas:
+                respuesta_final = (
+                    "Intenté aprender, pero no encontré un patrón automático para esa tarea todavía. "
+                    "Dímela con más detalle (ruta, archivo o patrón)."
+                )
+            else:
+                guardar_habilidad(ULTIMA_SOLICITUD_USUARIO, acciones_aprendidas)
+                resultados_aprendidos = ejecutar_acciones(acciones_aprendidas)
+                respuesta_final = "Aprendido y ejecutado en tiempo real.\n\n" + "\n".join(resultados_aprendidos)
+        guardar_mensaje_db("assistant", respuesta_final)
+        registrar_ejecucion(solicitud_original, respuesta_final)
+        return respuesta_final
+
+    if CONFIG.get("usar_habilidades_auto", True):
+        acciones_habilidad = buscar_habilidad(solicitud_original)
+        if acciones_habilidad:
+            acciones_habilidad = filtrar_acciones_por_intencion(acciones_habilidad, solicitud_original)
+            if acciones_habilidad:
+                resultados_habilidad = ejecutar_acciones(acciones_habilidad)
+                hubo_error_habilidad = any(_resultado_es_fallido(r) for r in resultados_habilidad)
+                registrar_leccion(
+                    solicitud_original,
+                    acciones_habilidad,
+                    "\n".join(resultados_habilidad),
+                    not hubo_error_habilidad,
+                )
+                respuesta_final = "\n".join(resultados_habilidad) or "Habilidad ejecutada."
+                guardar_mensaje_db("assistant", respuesta_final)
+                registrar_ejecucion(solicitud_original, respuesta_final)
+                return respuesta_final
+
+    acciones_auto = buscar_automatizacion_por_trigger(solicitud_original)
+    if acciones_auto:
+        acciones_auto = filtrar_acciones_por_intencion(acciones_auto, solicitud_original)
+        if acciones_auto:
+            resultados_auto = ejecutar_acciones(acciones_auto)
+            hubo_error_auto = any(_resultado_es_fallido(r) for r in resultados_auto)
+            registrar_leccion(solicitud_original, acciones_auto, "\n".join(resultados_auto), not hubo_error_auto)
+            respuesta_final = "\n".join(resultados_auto) or "Automatización ejecutada."
+            guardar_mensaje_db("assistant", respuesta_final)
+            registrar_ejecucion(solicitud_original, respuesta_final)
+            return respuesta_final
+
+    acciones_locales = acciones_locales_desde_texto(solicitud_original) if es_intencion_operativa(solicitud_original) else []
+    if acciones_locales:
+        acciones_locales = filtrar_acciones_por_intencion(acciones_locales, solicitud_original)
+    if acciones_locales:
+        resultados_locales = ejecutar_acciones(acciones_locales)
+        exito_local = not any(_resultado_es_fallido(r) for r in resultados_locales)
+        registrar_leccion(solicitud_original, acciones_locales, "\n".join(resultados_locales), exito_local)
+        if exito_local:
+            guardar_habilidad(solicitud_original, acciones_locales)
+        respuesta_final = "\n".join(resultados_locales)
+        guardar_mensaje_db("assistant", respuesta_final)
+        registrar_ejecucion(solicitud_original, respuesta_final)
+        return respuesta_final
+
+    if es_intencion_operativa(solicitud_original):
+        propuesta_auto = []
+        t_auto = solicitud_original.lower()
+        base_auto = resolver_ruta_alias(solicitud_original) or descubrir_ruta_escritorio()
+        if ("crear" in t_auto or "genera" in t_auto) and ("docx" in t_auto or "word" in t_auto):
+            propuesta_auto = [{"accion": "crear_archivo_especifico", "args": {"path": str(base_auto / "documento_generado.docx"), "tipo": "docx", "contenido": "Documento generado automáticamente"}}]
+        elif ("crear" in t_auto or "genera" in t_auto) and ("xlsx" in t_auto or "excel" in t_auto):
+            propuesta_auto = [{"accion": "crear_archivo_especifico", "args": {"path": str(base_auto / "tabla_generada.xlsx"), "tipo": "xlsx", "contenido": "columna1,columna2\nvalor1,valor2"}}]
+        elif ("crear" in t_auto or "genera" in t_auto) and ("pptx" in t_auto or "powerpoint" in t_auto):
+            propuesta_auto = [{"accion": "crear_archivo_especifico", "args": {"path": str(base_auto / "presentacion_generada.pptx"), "tipo": "pptx", "contenido": "Presentación generada automáticamente"}}]
+
+        if propuesta_auto:
+            resultados_auto = ejecutar_acciones(propuesta_auto)
+            exito_auto = not any(_resultado_es_fallido(r) for r in resultados_auto)
+            registrar_leccion(solicitud_original, propuesta_auto, "\n".join(resultados_auto), exito_auto)
+            if exito_auto:
+                guardar_habilidad(solicitud_original, propuesta_auto)
+            respuesta_auto = "\n".join(resultados_auto)
+            guardar_mensaje_db("assistant", respuesta_auto)
+            registrar_ejecucion(solicitud_original, respuesta_auto)
+            return respuesta_auto
+
+    try:
+        respuesta_cruda = decidir(solicitud_original)
+    except Exception as ex:
+        respuesta_cruda = json.dumps(
+            {
+                "respuesta": f"Error consultando proveedor IA: {ex}",
+                "acciones": [],
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        data = json.loads(respuesta_cruda)
+    except json.JSONDecodeError:
+        texto_plano = (respuesta_cruda or "").strip()
+        data = {"respuesta": texto_plano or "No devolviste JSON útil.", "acciones": []}
+
+    respuesta = data.get("respuesta", "").strip()
+    acciones = filtrar_acciones_por_intencion(data.get("acciones", []), solicitud_original)
+
+    if not acciones and any(
+        s in respuesta.lower()
+        for s in (
+            "no puedo acceder",
+            "no tengo la capacidad",
+            "no puedo acceder directamente",
+        )
+    ):
+        ruta_alias = resolver_ruta_alias(texto_l)
+        if ruta_alias:
+            acciones = [{"accion": "listar_directorio", "args": {"path": str(ruta_alias)}}]
+            if not respuesta:
+                respuesta = "Lo consulto localmente ahora mismo."
+
+    requiere_plan = es_intencion_operativa(solicitud_original)
+    if requiere_plan and ((not acciones) or any(p in respuesta.lower() for p in NEGATIVE_PATTERNS)):
+        try:
+            r_plan, a_plan = generar_acciones_con_modelo(solicitud_original)
+            if a_plan:
+                acciones = a_plan
+                if r_plan:
+                    respuesta = r_plan
+            else:
+                acciones = []
+                if not respuesta:
+                    respuesta = (
+                        "No encontré un plan ejecutable para esa petición aún. "
+                        "Si quieres, te muestro opciones o me das una instrucción más concreta."
+                    )
+        except Exception as ex:
+            acciones = []
+            if not respuesta:
+                respuesta = f"Error en planificación: {ex}"
+
+    if not tipo_tiempo and acciones:
+        acciones = [a for a in acciones if a.get("accion") != "obtener_hora"]
+
+    if intencion in ("archivos", "api", "voz", "general") and acciones:
+        acciones = [a for a in acciones if a.get("accion") not in ("obtener_ip_local", "obtener_ip_publica")]
+
+    resultados = ejecutar_acciones(acciones)
+    hubo_error = any(_resultado_es_fallido(r) for r in resultados)
+
+    if acciones and not hubo_error:
+        guardar_habilidad(solicitud_original, acciones)
+    registrar_leccion(solicitud_original, acciones, "\n".join(resultados), not hubo_error)
+
+    respuesta_final = respuesta or "Sin respuesta de texto."
+    if resultados:
+        respuesta_final += "\n\n" + "\n".join(resultados)
+
+    guardar_mensaje_db("assistant", respuesta_final)
+    registrar_ejecucion(solicitud_original, respuesta_final)
+    return respuesta_final
+
+
+class AgentCore:
+    def __init__(self):
+        init_db()
+        asegurar_habilidades_base()
+        depurar_datos_locales()
+        limpiar_habilidades_y_automatizaciones_conflictivas()
+
+    def process_prompt(self, prompt):
+        return procesar_prompt_sync(prompt)
 
 
 def _procesar_mensaje(texto):
@@ -3394,9 +3427,6 @@ def escuchar_y_enviar():
 
     threading.Thread(target=_run, daemon=True).start()
 
-
-btn_micro.configure(command=escuchar_y_enviar)
-
 def refrescar_microfonos():
     nombres = listar_microfonos()
     combo_mic.configure(values=nombres, state="readonly" if nombres else "disabled")
@@ -3406,44 +3436,344 @@ def refrescar_microfonos():
     guardar_config(CONFIG)
     estado_var.set("Micrófonos actualizados")
     chat_window.after(1200, lambda: estado_var.set("Listo"))
-
-btn_refresh_mic = tk.Button(
-    frame_input,
-    text="Mic",
-    command=refrescar_microfonos,
-    bg="#111827",
-    fg="#cbd5e1",
-    relief="flat",
-    padx=10,
-)
-btn_refresh_mic.pack(side="left", padx=5)
-
 def on_mic_change(_event=None):
     CONFIG["voz_entrada_microfono"] = mic_var.get()
     guardar_config(CONFIG)
 
-combo_mic.bind("<<ComboboxSelected>>", on_mic_change)
 
+def configurar_interfaz():
+    global root
+    global chat_window
+    global style
+    global estado_var
+    global header
+    global titulo
+    global tts_status_var
+    global tts_estado
+    global model_var
+    global combo_model
+    global provider_var
+    global combo_provider
+    global online_model_var
+    global combo_online_model
+    global mic_var
+    global combo_mic
+    global voz_style_var
+    global combo_voz_style
+    global voz_speed_var
+    global combo_voz_speed
+    global voz_var
+    global chk_voz
+    global skills_auto_var
+    global chk_skills_auto
+    global btn_compacto
+    global btn_guardar
+    global btn_habilidades
+    global btn_automatizaciones
+    global btn_integraciones
+    global btn_key
+    global frame_chat
+    global canvas
+    global scrollable_frame
+    global frame_input
+    global entrada
+    global btn_limpiar
+    global btn_micro
+    global btn_refresh_mic
+    global btn_enviar
+    global chat_compacto
+    global auto_compact_job
 
-btn_enviar = tk.Button(
-    frame_input,
-    text="Enviar",
-    command=enviar,
-    bg="#1d4ed8",
-    fg="#f8fafc",
-    relief="flat",
-    padx=14,
-)
-btn_enviar.pack(side="right", padx=10)
+    if chat_window is not None:
+        return chat_window
 
-entrada.bind("<Return>", enviar)
-combo_voz_style.bind("<<ComboboxSelected>>", on_voice_ui_change)
-combo_voz_speed.bind("<<ComboboxSelected>>", on_voice_ui_change)
-combo_provider.bind("<<ComboboxSelected>>", on_provider_change)
-combo_online_model.bind("<<ComboboxSelected>>", on_provider_change)
-chat_window.bind("<FocusIn>", lambda e: expandir_si_compacto())
-chat_window.bind("<Configure>", lambda e: guardar_geometria_actual())
-chat_window.protocol("WM_DELETE_WINDOW", cerrar_app)
+    root = tk.Tk()
+    chat_window = root
+    chat_window.title("Agente IA")
+    chat_window.geometry(
+        f"{CONFIG['window_size']}+{CONFIG.get('window_x', 1000)}+{CONFIG.get('window_y', 140)}"
+    )
+    chat_window.configure(bg="#060d1f")
+    chat_window.minsize(320, 420)
+
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("TCombobox", fieldbackground="#111827", foreground="white", arrowsize=13)
+
+    chat_compacto = False
+    auto_compact_job = None
+
+    header = tk.Frame(chat_window, bg="#0f172a", height=48)
+    header.pack(fill="x")
+
+    titulo = tk.Label(
+        header,
+        text="Asistente IA · modo manual",
+        bg="#0f172a",
+        fg="#e2e8f0",
+        font=("Segoe UI Semibold", 11),
+    )
+    titulo.pack(side="left", padx=10)
+
+    estado_var = tk.StringVar(value="Listo")
+    estado = tk.Label(
+        header, textvariable=estado_var, bg="#0f172a", fg="#94a3b8", font=("Segoe UI", 9)
+    )
+    estado.pack(side="left")
+
+    tts_status_var = tk.StringVar(value="🛑 silencio")
+    tts_estado = tk.Label(
+        header,
+        textvariable=tts_status_var,
+        bg="#0f172a",
+        fg="#60a5fa",
+        font=("Segoe UI", 9),
+    )
+    tts_estado.pack(side="left", padx=8)
+
+    model_var = tk.StringVar(value=CONFIG["model"])
+    combo_model = ttk.Combobox(
+        header,
+        textvariable=model_var,
+        values=["qwen2.5:7b", "llama3.1:8b", "mistral:7b", "phi3:mini"],
+        width=12,
+        state="readonly",
+    )
+    combo_model.pack(side="right", padx=8, pady=8)
+
+    provider_var = tk.StringVar(value=proveedor_ui_value(CONFIG.get("proveedor_ia", "local")))
+    combo_provider = ttk.Combobox(
+        header,
+        textvariable=provider_var,
+        values=["local", "api"],
+        width=8,
+        state="readonly",
+    )
+    combo_provider.pack(side="right", padx=4, pady=8)
+
+    online_model_var = tk.StringVar(value=CONFIG.get("modelo_online", "llama-3.1-8b-instant"))
+    combo_online_model = ttk.Combobox(
+        header,
+        textvariable=online_model_var,
+        values=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
+        width=22,
+        state="readonly",
+    )
+    combo_online_model.pack(side="right", padx=4, pady=8)
+
+    mic_names = listar_microfonos()
+    mic_var = tk.StringVar(value=CONFIG.get("voz_entrada_microfono", ""))
+    combo_mic = ttk.Combobox(
+        header,
+        textvariable=mic_var,
+        values=mic_names,
+        width=26,
+        state="readonly" if mic_names else "disabled",
+    )
+    if not mic_var.get() and mic_names:
+        mic_var.set(mic_names[0])
+    combo_mic.pack(side="right", padx=4, pady=8)
+
+    voz_style_var = tk.StringVar(value=CONFIG.get("voz_style", "Natural"))
+    combo_voz_style = ttk.Combobox(
+        header,
+        textvariable=voz_style_var,
+        values=["Natural", "Suave", "Profunda", "Femenina", "Masculina"],
+        width=10,
+        state="readonly",
+    )
+    combo_voz_style.pack(side="right", padx=4, pady=8)
+
+    voz_speed_var = tk.StringVar(value=CONFIG.get("voz_speed_label", "Normal"))
+    combo_voz_speed = ttk.Combobox(
+        header,
+        textvariable=voz_speed_var,
+        values=["Lenta", "Normal", "Rápida"],
+        width=8,
+        state="readonly",
+    )
+    combo_voz_speed.pack(side="right", padx=4, pady=8)
+
+    voz_var = tk.BooleanVar(value=CONFIG["voz_activa"])
+    chk_voz = tk.Checkbutton(
+        header,
+        text="Voz",
+        variable=voz_var,
+        command=on_toggle_voz,
+        bg="#0f172a",
+        fg="#cbd5e1",
+        selectcolor="#1f2937",
+        activebackground="#0f172a",
+        activeforeground="#cbd5e1",
+        font=("Segoe UI", 9),
+    )
+    chk_voz.pack(side="right")
+
+    skills_auto_var = tk.BooleanVar(value=bool(CONFIG.get("usar_habilidades_auto", False)))
+    chk_skills_auto = tk.Checkbutton(
+        header,
+        text="AutoSkills",
+        variable=skills_auto_var,
+        bg="#0f172a",
+        fg="#cbd5e1",
+        selectcolor="#1f2937",
+        activebackground="#0f172a",
+        activeforeground="#cbd5e1",
+        font=("Segoe UI", 9),
+    )
+    chk_skills_auto.pack(side="right", padx=4)
+
+    btn_compacto = tk.Button(
+        header,
+        text="▣",
+        command=alternar_compacto,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=7,
+    )
+    btn_compacto.pack(side="right", padx=4)
+
+    btn_guardar = tk.Button(
+        header,
+        text="Guardar",
+        command=guardar_preferencias,
+        bg="#1d4ed8",
+        fg="#f8fafc",
+        relief="flat",
+        padx=10,
+    )
+    btn_guardar.pack(side="right", padx=6)
+
+    btn_habilidades = tk.Button(
+        header,
+        text="Habilidades",
+        command=abrir_panel_habilidades,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_habilidades.pack(side="right", padx=6)
+
+    btn_automatizaciones = tk.Button(
+        header,
+        text="Automatizaciones",
+        command=abrir_panel_automatizaciones,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_automatizaciones.pack(side="right", padx=6)
+
+    btn_integraciones = tk.Button(
+        header,
+        text="Integraciones",
+        command=abrir_panel_integraciones,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_integraciones.pack(side="right", padx=6)
+
+    btn_key = tk.Button(
+        header,
+        text="Groq Key",
+        command=pedir_api_key_groq,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_key.pack(side="right", padx=6)
+
+    frame_chat = tk.Frame(chat_window, bg="#030712")
+    frame_chat.pack(fill="both", expand=True)
+
+    canvas = tk.Canvas(frame_chat, bg="#030712", highlightthickness=0)
+    scrollbar = ttk.Scrollbar(
+        frame_chat, orient="vertical", style="Vertical.TScrollbar", command=canvas.yview
+    )
+    scrollable_frame = tk.Frame(canvas, bg="#030712")
+    scrollable_frame.bind(
+        "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    frame_input = tk.Frame(chat_window, bg="#030712")
+    frame_input.pack(fill="x")
+
+    entrada = tk.Entry(
+        frame_input,
+        bg="#111827",
+        fg="#e2e8f0",
+        insertbackground="#e2e8f0",
+        font=("Segoe UI", 11),
+        relief="flat",
+    )
+    entrada.pack(side="left", fill="x", expand=True, padx=10, pady=10, ipady=5)
+
+    btn_limpiar = tk.Button(
+        frame_input,
+        text="Limpiar",
+        command=limpiar_historial,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_limpiar.pack(side="left", padx=5)
+
+    btn_micro = tk.Button(
+        frame_input,
+        text="🎤",
+        command=escuchar_y_enviar,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_micro.pack(side="left", padx=5)
+
+    btn_refresh_mic = tk.Button(
+        frame_input,
+        text="Mic",
+        command=refrescar_microfonos,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    )
+    btn_refresh_mic.pack(side="left", padx=5)
+
+    btn_enviar = tk.Button(
+        frame_input,
+        text="Enviar",
+        command=enviar,
+        bg="#1d4ed8",
+        fg="#f8fafc",
+        relief="flat",
+        padx=14,
+    )
+    btn_enviar.pack(side="right", padx=10)
+
+    entrada.bind("<Return>", enviar)
+    combo_voz_style.bind("<<ComboboxSelected>>", on_voice_ui_change)
+    combo_voz_speed.bind("<<ComboboxSelected>>", on_voice_ui_change)
+    combo_provider.bind("<<ComboboxSelected>>", on_provider_change)
+    combo_online_model.bind("<<ComboboxSelected>>", on_provider_change)
+    combo_mic.bind("<<ComboboxSelected>>", on_mic_change)
+    chat_window.bind("<FocusIn>", lambda e: expandir_si_compacto())
+    chat_window.bind("<Configure>", lambda e: guardar_geometria_actual())
+    chat_window.protocol("WM_DELETE_WINDOW", cerrar_app)
+
+    return chat_window
+
 
 def depurar_datos_locales():
     return
@@ -3498,10 +3828,11 @@ init_db()
 asegurar_habilidades_base()
 depurar_datos_locales()
 limpiar_habilidades_y_automatizaciones_conflictivas()
-mensaje("Asistente listo. Ventana minimalista activa.", "system")
-programar_auto_compacto()
 
 if __name__ == "__main__":
+    configurar_interfaz()
+    mensaje("Asistente listo. Ventana minimalista activa.", "system")
+    programar_auto_compacto()
     root.mainloop()
 
 

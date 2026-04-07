@@ -5,8 +5,10 @@ Proyecto de agente local con modo hibrido para trabajar con IA local o proveedor
 ## Estado actual
 
 - Interfaz de escritorio en Tkinter.
+- Seleccion manual del proveedor: `local` o `api`.
 - Ejecucion de herramientas locales para archivos, comandos, voz e integraciones.
 - Soporte para Ollama en local y Groq por API.
+- Orquestador HTTP operativo con endpoints `/health`, `/ask` y `/accion`.
 - Memoria y habilidades guardadas en SQLite local.
 
 ## Estructura
@@ -17,7 +19,6 @@ Proyecto de agente local con modo hibrido para trabajar con IA local o proveedor
 
 ## Objetivo de la siguiente fase
 
-- Separar `core` y `ui`.
-- Mantener seleccion manual de proveedor: local o API.
-- Corregir el orquestador para que funcione como servicio real.
+- Seguir separando `core` y `ui` para reducir el tamaño del modulo principal.
 - Preparar una base segura para aprendizaje guiado y futuras mejoras del agente.
+- Modernizar la interfaz para que se vea mas limpia, consistente y minimalista.

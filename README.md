@@ -10,6 +10,8 @@ Proyecto de agente local con modo hibrido para trabajar con IA local o proveedor
 - Ejecucion de herramientas locales para archivos, comandos, voz e integraciones.
 - Soporte para Ollama en local y Groq por API.
 - Orquestador HTTP operativo con endpoints `/health`, `/ask` y `/accion`.
+- Reintentos del modelo y respuestas de respaldo para no quedarse sin contestar fácilmente.
+- Panel de `Mejoras` para propuestas seguras que no tocan código automáticamente sin autorización.
 - Memoria y habilidades guardadas en SQLite local.
 
 ## Estructura

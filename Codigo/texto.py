@@ -31,6 +31,8 @@ except Exception:
 BASE_DIR = Path(__file__).resolve().parent
 APP_DIR = BASE_DIR.parent / "agente_ia_data"
 APP_DIR.mkdir(exist_ok=True)
+MEJORAS_DIR = APP_DIR / "mejoras_seguras"
+MEJORAS_DIR.mkdir(exist_ok=True)
 
 DB_PATH = APP_DIR / "historial.db"
 CONFIG_PATH = APP_DIR / "config.json"
@@ -81,6 +83,9 @@ NEGATIVE_PATTERNS = (
     "no puedo acceder",
     "no puedo ayudarte con eso",
 )
+
+MAX_MODELO_REINTENTOS = 3
+MAX_JSON_EXTRACTION_CHARS = 20000
 
 
 def normalizar_proveedor_ia(valor):
@@ -145,6 +150,7 @@ chk_skills_auto = None
 btn_compacto = None
 btn_guardar = None
 btn_habilidades = None
+btn_mejoras = None
 btn_automatizaciones = None
 btn_integraciones = None
 btn_key = None
@@ -341,6 +347,22 @@ def init_db():
                 acciones_json TEXT NOT NULL,
                 resultado TEXT NOT NULL,
                 exito INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mejoras_seguras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                tipo TEXT NOT NULL,
+                titulo TEXT NOT NULL,
+                solicitud TEXT NOT NULL,
+                detalle TEXT NOT NULL,
+                propuesta_json TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'pendiente',
+                origen TEXT NOT NULL DEFAULT 'manual',
+                requiere_autorizacion INTEGER NOT NULL DEFAULT 1
             )
             """
         )
@@ -767,6 +789,215 @@ def borrar_todas_automatizaciones():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM automatizaciones")
         conn.commit()
+
+
+def _sanear_tipo_mejora(tipo):
+    valor = normalizar_texto_cache(tipo)
+    permitidos = {"habilidad", "automatizacion", "configuracion", "codigo", "prompt"}
+    return valor if valor in permitidos else "codigo"
+
+
+def crear_mejora_segura(tipo, titulo, solicitud, detalle, propuesta, origen="manual", requiere_autorizacion=True):
+    tipo_s = _sanear_tipo_mejora(tipo)
+    titulo_s = (titulo or "Mejora segura pendiente").strip()[:180]
+    solicitud_s = (solicitud or "").strip()[:400]
+    detalle_s = (detalle or "").strip()[:4000]
+    try:
+        propuesta_json = json.dumps(propuesta or {}, ensure_ascii=False, indent=2)
+    except TypeError:
+        propuesta_json = json.dumps({"detalle": str(propuesta or "")}, ensure_ascii=False, indent=2)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT id, propuesta_json
+            FROM mejoras_seguras
+            WHERE tipo=? AND solicitud=? AND estado IN ('pendiente', 'aprobada')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (tipo_s, solicitud_s),
+        ).fetchone()
+        if row:
+            mejora_id = int(row[0])
+            conn.execute(
+                """
+                UPDATE mejoras_seguras
+                SET fecha=?, titulo=?, detalle=?, propuesta_json=?, origen=?, requiere_autorizacion=?
+                WHERE id=?
+                """,
+                (
+                    datetime.datetime.now().isoformat(),
+                    titulo_s,
+                    detalle_s,
+                    propuesta_json,
+                    str(origen or "manual")[:80],
+                    1 if requiere_autorizacion else 0,
+                    mejora_id,
+                ),
+            )
+            conn.commit()
+            return mejora_id
+
+        cur = conn.execute(
+            """
+            INSERT INTO mejoras_seguras
+            (fecha, tipo, titulo, solicitud, detalle, propuesta_json, estado, origen, requiere_autorizacion)
+            VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?, ?)
+            """,
+            (
+                datetime.datetime.now().isoformat(),
+                tipo_s,
+                titulo_s,
+                solicitud_s,
+                detalle_s,
+                propuesta_json,
+                str(origen or "manual")[:80],
+                1 if requiere_autorizacion else 0,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def obtener_mejoras_seguras(limite=300, estado=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        if estado:
+            return conn.execute(
+                """
+                SELECT id, tipo, titulo, solicitud, detalle, propuesta_json, estado, origen, requiere_autorizacion, fecha
+                FROM mejoras_seguras
+                WHERE estado=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (estado, limite),
+            ).fetchall()
+        return conn.execute(
+            """
+            SELECT id, tipo, titulo, solicitud, detalle, propuesta_json, estado, origen, requiere_autorizacion, fecha
+            FROM mejoras_seguras
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limite,),
+        ).fetchall()
+
+
+def obtener_mejora_segura_por_id(mejora_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(
+            """
+            SELECT id, tipo, titulo, solicitud, detalle, propuesta_json, estado, origen, requiere_autorizacion, fecha
+            FROM mejoras_seguras
+            WHERE id=?
+            """,
+            (mejora_id,),
+        ).fetchone()
+
+
+def actualizar_estado_mejora_segura(mejora_id, estado):
+    estado_s = normalizar_texto_cache(estado)
+    if estado_s not in {"pendiente", "aprobada", "rechazada", "aplicada"}:
+        return False, "Estado de mejora inválido."
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE mejoras_seguras SET estado=? WHERE id=?", (estado_s, mejora_id))
+        conn.commit()
+    return True, f"Mejora marcada como {estado_s}."
+
+
+def _exportar_mejora_codigo(mejora_id, titulo, detalle, propuesta):
+    fecha_txt = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", (titulo or "mejora").strip())[:50] or "mejora"
+    destino = MEJORAS_DIR / f"{fecha_txt}_{mejora_id}_{safe_name}.md"
+    contenido = [
+        f"# Mejora segura #{mejora_id}",
+        "",
+        f"Titulo: {titulo}",
+        "",
+        "## Detalle",
+        detalle or "(sin detalle)",
+        "",
+        "## Propuesta JSON",
+        "```json",
+        json.dumps(propuesta or {}, ensure_ascii=False, indent=2),
+        "```",
+        "",
+    ]
+    destino.write_text("\n".join(contenido), encoding="utf-8")
+    return destino
+
+
+def aplicar_mejora_segura(mejora_id):
+    fila = obtener_mejora_segura_por_id(mejora_id)
+    if not fila:
+        return False, "No encontré esa mejora segura."
+
+    _id, tipo, titulo, solicitud, detalle, propuesta_json, estado, _origen, _req, _fecha = fila
+    if estado == "rechazada":
+        return False, "Esa mejora fue rechazada y no se puede aplicar."
+
+    try:
+        propuesta = json.loads(propuesta_json or "{}")
+    except json.JSONDecodeError:
+        propuesta = {}
+
+    payload = propuesta.get("propuesta", propuesta) if isinstance(propuesta, dict) else {}
+
+    if tipo == "habilidad":
+        trigger = str(payload.get("trigger_texto") or solicitud or titulo).strip()
+        acciones = payload.get("acciones", [])
+        if not trigger or not isinstance(acciones, list) or not acciones:
+            return False, "La mejora no trae una habilidad aplicable."
+        guardar_habilidad(trigger, acciones)
+        actualizar_estado_mejora_segura(mejora_id, "aplicada")
+        return True, f"Habilidad aplicada: {trigger}"
+
+    if tipo == "automatizacion":
+        nombre = str(payload.get("nombre") or titulo or "Automatización segura").strip()
+        trigger = str(payload.get("trigger_texto") or solicitud or titulo).strip()
+        acciones = payload.get("acciones", [])
+        habilitada = bool(payload.get("habilitada", True))
+        if not nombre or not trigger or not isinstance(acciones, list) or not acciones:
+            return False, "La mejora no trae una automatización aplicable."
+        ok, msg = crear_automatizacion(nombre, trigger, json.dumps(acciones, ensure_ascii=False), habilitada=habilitada)
+        if not ok:
+            return False, msg
+        actualizar_estado_mejora_segura(mejora_id, "aplicada")
+        return True, msg
+
+    if tipo == "configuracion":
+        updates = payload.get("config_updates", {})
+        if not isinstance(updates, dict) or not updates:
+            return False, "La mejora no trae cambios de configuración aplicables."
+        permitidas = {
+            "usar_habilidades_auto",
+            "proveedor_ia",
+            "modelo_online",
+            "model",
+            "voz_activa",
+            "voz_style",
+            "voz_speed_label",
+            "compact_window_size",
+            "window_size",
+        }
+        aplicadas = []
+        for clave, valor in updates.items():
+            if clave in permitidas:
+                if clave == "proveedor_ia":
+                    CONFIG[clave] = normalizar_proveedor_ia(valor)
+                else:
+                    CONFIG[clave] = valor
+                aplicadas.append(clave)
+        if not aplicadas:
+            return False, "No encontré cambios seguros para aplicar automáticamente."
+        guardar_config(CONFIG)
+        actualizar_estado_mejora_segura(mejora_id, "aplicada")
+        return True, "Configuración aplicada: " + ", ".join(aplicadas)
+
+    destino = _exportar_mejora_codigo(mejora_id, titulo, detalle, propuesta)
+    actualizar_estado_mejora_segura(mejora_id, "aprobada")
+    return True, f"Mejora aprobada y exportada para revisión en: {destino}"
 
 
 def buscar_automatizacion_por_trigger(texto):
@@ -1698,6 +1929,278 @@ def validar_groq_api_key(api_key_override=None, timeout=20):
     return False, f"Groq {r.status_code}: {detalle}", api_key
 
 
+def extraer_json_desde_texto(texto):
+    bruto = str(texto or "").strip()
+    if not bruto:
+        return None
+    candidatos = [bruto]
+
+    bloques = re.findall(r"```(?:json)?\s*(.*?)```", bruto, flags=re.DOTALL | re.IGNORECASE)
+    candidatos.extend([b.strip() for b in bloques if b and b.strip()])
+
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        start = bruto.find(open_ch)
+        end = bruto.rfind(close_ch)
+        if start != -1 and end != -1 and end > start:
+            candidatos.append(bruto[start : end + 1].strip())
+
+    for candidato in candidatos:
+        if not candidato:
+            continue
+        try:
+            return json.loads(candidato)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _llamar_modelo_bruto(prompt_sistema, prompt_usuario):
+    proveedor = normalizar_proveedor_ia(CONFIG.get("proveedor_ia", "local"))
+    if proveedor == "online":
+        return chat_online_groq(prompt_sistema, prompt_usuario)
+
+    validar_ollama_disponible()
+    res = ollama.chat(
+        model=CONFIG["model"],
+        messages=[
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user", "content": prompt_usuario},
+        ],
+        keep_alive="30m",
+    )
+    return res["message"]["content"]
+
+
+def consultar_modelo_con_reintentos(
+    prompt_sistema,
+    prompt_usuario,
+    expect_json=False,
+    max_intentos=MAX_MODELO_REINTENTOS,
+):
+    ultimo_error = "sin detalles"
+    ultimo_texto = ""
+
+    for intento in range(1, max_intentos + 1):
+        prompt_actual = prompt_usuario
+        if intento > 1:
+            prompt_actual += (
+                "\n\nREINTENTO OBLIGATORIO:\n"
+                f"- Intento actual: {intento} de {max_intentos}.\n"
+                f"- Problema del intento anterior: {ultimo_error}.\n"
+                "- Corrige la salida. No te rindas. Si no puedes completar todo, entrega el mejor siguiente intento útil.\n"
+            )
+
+        try:
+            contenido = _llamar_modelo_bruto(prompt_sistema, prompt_actual)
+            ultimo_texto = str(contenido or "").strip()
+            if not expect_json:
+                if ultimo_texto:
+                    return ultimo_texto
+                ultimo_error = "respuesta vacía"
+                continue
+
+            data = extraer_json_desde_texto(ultimo_texto[:MAX_JSON_EXTRACTION_CHARS])
+            if isinstance(data, dict):
+                return data
+            ultimo_error = "la respuesta no contenía un JSON válido"
+        except Exception as ex:
+            ultimo_error = str(ex)
+
+    if expect_json:
+        raise RuntimeError(f"No pude obtener JSON útil tras {max_intentos} intentos: {ultimo_error}")
+    raise RuntimeError(f"No pude obtener respuesta útil tras {max_intentos} intentos: {ultimo_error}")
+
+
+def construir_respuesta_respaldo(solicitud, motivo="", mejora_id=None):
+    partes = [
+        "Lo intenté varias veces y no logré resolverlo por completo todavía.",
+        "No me voy a quedar mudo: puedo volver a intentarlo si me das un poco más de contexto o una ruta más concreta.",
+    ]
+    if motivo:
+        partes.append(f"Detalle del bloqueo: {motivo}")
+    if mejora_id is not None:
+        partes.append(f"Además te dejé una mejora segura pendiente para revisión con ID #{mejora_id}.")
+    return " ".join(partes)
+
+
+def es_solicitud_auto_mejora(texto):
+    t = normalizar_texto_cache(texto)
+    patrones = (
+        "mejorate",
+        "mejora tu",
+        "auto mejora",
+        "automejora",
+        "quiero que aprendas",
+        "aprende una nueva capacidad",
+        "hazte capaz",
+        "agrega la capacidad",
+        "mejora tu interfaz",
+        "mejora tu codigo",
+    )
+    return any(p in t for p in patrones)
+
+
+def construir_propuesta_mejora_local(solicitud, motivo="manual"):
+    t = normalizar_texto_cache(solicitud)
+    if any(k in t for k in ("interfaz", "ui", "ventana", "diseño")):
+        tipo = "codigo"
+        titulo = "Mejorar interfaz del agente"
+        detalle = (
+            "El agente detectó una solicitud de mejora visual. Esta mejora requiere cambios en la UI y debe "
+            "quedar pendiente hasta autorización explícita."
+        )
+        propuesta = {
+            "tipo": tipo,
+            "propuesta": {
+                "modulos_sugeridos": ["Codigo/texto.py"],
+                "enfoque": [
+                    "ajustar layout visual",
+                    "mejorar jerarquía de controles",
+                    "mantener selector manual local/api",
+                ],
+                "pruebas_sugeridas": ["abrir UI", "probar cambios de proveedor", "verificar paneles secundarios"],
+                "motivo": motivo,
+            },
+        }
+        return tipo, titulo, detalle, propuesta
+
+    if any(k in t for k in ("automatiza", "automatizacion", "automatización")):
+        tipo = "automatizacion"
+        titulo = "Nueva automatización segura"
+        detalle = "La solicitud parece poder resolverse con una automatización declarativa y segura."
+        propuesta = {
+            "tipo": tipo,
+            "propuesta": {
+                "nombre": "Automatización propuesta",
+                "trigger_texto": solicitud[:200],
+                "acciones": [],
+                "habilitada": True,
+                "motivo": motivo,
+            },
+        }
+        return tipo, titulo, detalle, propuesta
+
+    tipo = "codigo"
+    titulo = "Nueva capacidad pendiente de mejora"
+    detalle = (
+        "La solicitud requiere una mejora más profunda del agente. Se registra como propuesta segura para revisión "
+        "y no se tocará código automáticamente sin autorización."
+    )
+    propuesta = {
+        "tipo": tipo,
+        "propuesta": {
+            "modulos_sugeridos": ["Codigo/texto.py", "Codigo/orquestador_local.py"],
+            "objetivo": solicitud[:300],
+            "motivo": motivo,
+            "pruebas_sugeridas": ["probar proveedor local", "probar proveedor api", "probar flujo principal"],
+        },
+    }
+    return tipo, titulo, detalle, propuesta
+
+
+def generar_propuesta_mejora_segura(solicitud, motivo="manual"):
+    memoria = obtener_contexto_db(limite=12)
+    historial = construir_resumen_contexto(memoria, max_chars=900)
+    prompt = f"""
+Eres un arquitecto de mejoras seguras para un agente de escritorio.
+Debes responder SOLO JSON válido con este formato:
+{{
+  "tipo": "habilidad|automatizacion|configuracion|codigo|prompt",
+  "titulo": "resumen corto",
+  "detalle": "explicación breve para el usuario",
+  "requiere_autorizacion": true,
+  "propuesta": {{
+    "trigger_texto": "opcional",
+    "acciones": [],
+    "nombre": "opcional",
+    "config_updates": {{}},
+    "modulos_sugeridos": [],
+    "pruebas_sugeridas": [],
+    "motivo": "{motivo}"
+  }}
+}}
+
+Reglas:
+- Prefiere `habilidad`, `automatizacion` o `configuracion` si se puede mejorar sin tocar código.
+- Usa `codigo` solo si realmente requiere cambios internos.
+- Nunca propongas autoeditar código en este paso.
+- Si no hay solución directa, devuelve una propuesta útil igualmente.
+
+Historial:
+{historial}
+
+Solicitud de mejora:
+{solicitud}
+"""
+    try:
+        data = consultar_modelo_con_reintentos(
+            "Diseñas mejoras seguras y autorizables para un agente local. Responde solo JSON válido.",
+            prompt,
+            expect_json=True,
+        )
+        tipo = _sanear_tipo_mejora(data.get("tipo"))
+        tipo, titulo, detalle, propuesta = normalizar_propuesta_mejora_modelo(tipo, data, solicitud, motivo)
+        if not detalle:
+            detalle = "Se generó una propuesta de mejora segura pendiente de autorización."
+        return tipo, titulo, detalle, propuesta
+    except Exception:
+        return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+
+
+def crear_mejora_segura_desde_solicitud(solicitud, motivo="manual", origen="manual"):
+    tipo, titulo, detalle, propuesta = generar_propuesta_mejora_segura(solicitud, motivo=motivo)
+    mejora_id = crear_mejora_segura(
+        tipo=tipo,
+        titulo=titulo,
+        solicitud=solicitud,
+        detalle=detalle,
+        propuesta=propuesta,
+        origen=origen,
+        requiere_autorizacion=True,
+    )
+    return mejora_id, tipo, titulo, detalle, propuesta
+
+
+def normalizar_propuesta_mejora_modelo(tipo, data, solicitud, motivo):
+    if not isinstance(data, dict):
+        return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+
+    propuesta = data.get("propuesta", {})
+    if not isinstance(propuesta, dict):
+        propuesta = {}
+        data["propuesta"] = propuesta
+
+    if tipo in {"habilidad", "automatizacion"}:
+        acciones = propuesta.get("acciones", [])
+        if not isinstance(acciones, list) or not acciones:
+            return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+        for accion in acciones:
+            if not isinstance(accion, dict) or "accion" not in accion:
+                return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+
+    if tipo == "configuracion":
+        updates = propuesta.get("config_updates", {})
+        if not isinstance(updates, dict):
+            return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+        permitidas = {
+            "usar_habilidades_auto",
+            "proveedor_ia",
+            "modelo_online",
+            "model",
+            "voz_activa",
+            "voz_style",
+            "voz_speed_label",
+            "compact_window_size",
+            "window_size",
+        }
+        updates_filtradas = {k: v for k, v in updates.items() if k in permitidas}
+        if not updates_filtradas:
+            return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+        propuesta["config_updates"] = updates_filtradas
+
+    return tipo, str(data.get("titulo") or "Mejora segura pendiente").strip(), str(data.get("detalle") or "").strip(), data
+
+
 def chat_online_groq(prompt_sistema, prompt_usuario):
     api_key = obtener_groq_api_key()
 
@@ -1798,20 +2301,12 @@ Usuario:
 {prompt}
 """
 
-    proveedor = normalizar_proveedor_ia(CONFIG.get("proveedor_ia", "local"))
-    if proveedor == "online":
-        return chat_online_groq(
-            "Eres un asistente técnico preciso. Debes responder en JSON válido.",
-            contexto,
-        )
-
-    validar_ollama_disponible()
-    res = ollama.chat(
-        model=CONFIG["model"],
-        messages=[{"role": "user", "content": contexto}],
-        keep_alive="30m",
+    data = consultar_modelo_con_reintentos(
+        "Eres un asistente técnico preciso. Debes responder en JSON válido.",
+        contexto,
+        expect_json=True,
     )
-    return res["message"]["content"]
+    return json.dumps(data, ensure_ascii=False)
 
 
 def ejecutar_acciones(lista):
@@ -2124,6 +2619,178 @@ def abrir_panel_habilidades():
         trigger_entry.delete(0, tk.END)
         acciones_txt.delete("1.0", tk.END)
         cargar_tabla()
+
+    cargar_tabla()
+
+
+def abrir_panel_mejoras():
+    panel = tk.Toplevel(chat_window)
+    panel.title("Mejoras seguras")
+    panel.geometry("1040x640")
+    panel.configure(bg="#030712")
+
+    top = tk.Frame(panel, bg="#0f172a")
+    top.pack(fill="x")
+    tk.Label(
+        top,
+        text="Mejoras seguras pendientes y autorizadas",
+        bg="#0f172a",
+        fg="#e2e8f0",
+        font=("Segoe UI Semibold", 11),
+    ).pack(side="left", padx=10, pady=8)
+
+    body = tk.Frame(panel, bg="#030712")
+    body.pack(fill="both", expand=True, padx=10, pady=10)
+
+    left = tk.Frame(body, bg="#030712")
+    left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+    columns = ("id", "tipo", "titulo", "estado", "origen", "fecha")
+    tree = ttk.Treeview(left, columns=columns, show="headings", height=18)
+    for col, label, width in (
+        ("id", "ID", 60),
+        ("tipo", "Tipo", 110),
+        ("titulo", "Título", 340),
+        ("estado", "Estado", 100),
+        ("origen", "Origen", 100),
+        ("fecha", "Fecha", 180),
+    ):
+        tree.heading(col, text=label)
+        tree.column(col, width=width, anchor="w")
+    tree.pack(fill="both", expand=True)
+
+    right = tk.Frame(body, bg="#030712")
+    right.pack(side="right", fill="both", expand=True)
+
+    resumen_var = tk.StringVar(value="Selecciona una mejora para ver su detalle.")
+    tk.Label(
+        right,
+        textvariable=resumen_var,
+        bg="#030712",
+        fg="#e2e8f0",
+        justify="left",
+        wraplength=430,
+        font=("Segoe UI Semibold", 10),
+    ).pack(anchor="w")
+
+    detalle_var = tk.StringVar(value="")
+    tk.Label(
+        right,
+        textvariable=detalle_var,
+        bg="#030712",
+        fg="#94a3b8",
+        justify="left",
+        wraplength=430,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(8, 10))
+
+    tk.Label(
+        right,
+        text="Propuesta",
+        bg="#030712",
+        fg="#cbd5e1",
+        font=("Segoe UI Semibold", 9),
+    ).pack(anchor="w")
+    propuesta_txt = tk.Text(
+        right,
+        bg="#0b1220",
+        fg="#e2e8f0",
+        insertbackground="#e2e8f0",
+        relief="flat",
+        height=20,
+    )
+    propuesta_txt.pack(fill="both", expand=True)
+
+    selected = {"id": None}
+
+    def cargar_tabla():
+        for item in tree.get_children():
+            tree.delete(item)
+        for mid, tipo, titulo, _sol, _det, _prop, estado, origen, _req, fecha in obtener_mejoras_seguras():
+            tree.insert("", "end", values=(mid, tipo, titulo, estado, origen, fecha))
+
+    def cargar_detalle(mejora_id):
+        fila = obtener_mejora_segura_por_id(mejora_id)
+        if not fila:
+            resumen_var.set("No encontré esa mejora.")
+            detalle_var.set("")
+            propuesta_txt.delete("1.0", tk.END)
+            return
+        _id, tipo, titulo, solicitud, detalle, propuesta_json, estado, origen, requiere_autorizacion, fecha = fila
+        resumen_var.set(f"#{_id} · {titulo} · {tipo} · {estado}")
+        detalle_var.set(
+            f"Solicitud: {solicitud}\nOrigen: {origen}\nFecha: {fecha}\nRequiere autorización: {'sí' if requiere_autorizacion else 'no'}\n\n{detalle}"
+        )
+        propuesta_txt.delete("1.0", tk.END)
+        propuesta_txt.insert("1.0", propuesta_json)
+
+    def on_select(_evt=None):
+        sel = tree.selection()
+        if not sel:
+            return
+        vals = tree.item(sel[0], "values")
+        if not vals:
+            return
+        selected["id"] = int(vals[0])
+        cargar_detalle(selected["id"])
+
+    tree.bind("<<TreeviewSelect>>", on_select)
+
+    acciones = tk.Frame(right, bg="#030712")
+    acciones.pack(fill="x", pady=(10, 0))
+
+    def aprobar_aplicar():
+        if not selected["id"]:
+            messagebox.showinfo("Mejoras", "Selecciona una mejora primero.", parent=panel)
+            return
+        ok, msg = aplicar_mejora_segura(selected["id"])
+        if not ok:
+            messagebox.showerror("Mejoras", msg, parent=panel)
+            return
+        sincronizar_ui_desde_config()
+        messagebox.showinfo("Mejoras", msg, parent=panel)
+        cargar_tabla()
+        cargar_detalle(selected["id"])
+
+    def rechazar_mejora():
+        if not selected["id"]:
+            messagebox.showinfo("Mejoras", "Selecciona una mejora primero.", parent=panel)
+            return
+        ok, msg = actualizar_estado_mejora_segura(selected["id"], "rechazada")
+        if not ok:
+            messagebox.showerror("Mejoras", msg, parent=panel)
+            return
+        messagebox.showinfo("Mejoras", msg, parent=panel)
+        cargar_tabla()
+        cargar_detalle(selected["id"])
+
+    tk.Button(
+        acciones,
+        text="Recargar",
+        command=cargar_tabla,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=10,
+    ).pack(side="left")
+    tk.Button(
+        acciones,
+        text="Aprobar / Aplicar",
+        command=aprobar_aplicar,
+        bg="#1d4ed8",
+        fg="#f8fafc",
+        relief="flat",
+        padx=10,
+    ).pack(side="left", padx=6)
+    tk.Button(
+        acciones,
+        text="Rechazar",
+        command=rechazar_mejora,
+        bg="#7f1d1d",
+        fg="#f8fafc",
+        relief="flat",
+        padx=10,
+    ).pack(side="left")
 
     cargar_tabla()
 
@@ -2696,6 +3363,26 @@ def actualizar_resumen_visual():
         titulo.configure(text=f"Agente IA híbrido · {provider_ui.upper()}")
 
 
+def sincronizar_ui_desde_config():
+    if provider_var is not None:
+        provider_var.set(proveedor_ui_value(CONFIG.get("proveedor_ia", "local")))
+    if model_var is not None:
+        model_var.set(CONFIG.get("model", "qwen2.5:7b"))
+    if online_model_var is not None:
+        online_model_var.set(CONFIG.get("modelo_online", "llama-3.1-8b-instant"))
+    if voz_var is not None:
+        voz_var.set(bool(CONFIG.get("voz_activa", True)))
+    if voz_style_var is not None:
+        voz_style_var.set(CONFIG.get("voz_style", "Natural"))
+    if voz_speed_var is not None:
+        voz_speed_var.set(CONFIG.get("voz_speed_label", "Normal"))
+    if skills_auto_var is not None:
+        skills_auto_var.set(bool(CONFIG.get("usar_habilidades_auto", False)))
+    if mic_var is not None:
+        mic_var.set(CONFIG.get("voz_entrada_microfono", mic_var.get()))
+    actualizar_resumen_visual()
+
+
 def alternar_panel_ajustes():
     global settings_visible
     if settings_panel is None or btn_settings is None:
@@ -3099,6 +3786,7 @@ def es_intencion_operativa(texto):
         "archivos",
         "carpeta",
         "directorio",
+        "ruta",
         "escritorio",
         "desktop",
         "documento",
@@ -3120,6 +3808,13 @@ def es_intencion_operativa(texto):
         "webhook",
         "orquestador",
         "workflow",
+        "compila",
+        "compilar",
+        "instala",
+        "instalar",
+        "apk",
+        "proyecto",
+        "programa",
         "comando",
         "cmd",
     )
@@ -3171,26 +3866,16 @@ Historial:
 Solicitud:
 {texto}
 """
-    proveedor = normalizar_proveedor_ia(CONFIG.get("proveedor_ia", "local"))
-    if proveedor == "online":
-        contenido = chat_online_groq(
+    try:
+        data = consultar_modelo_con_reintentos(
             "Eres un planner de acciones. Devuelves JSON válido estricto.",
             prompt_plan,
+            expect_json=True,
         )
-    else:
-        validar_ollama_disponible()
-        res = ollama.chat(
-            model=CONFIG["model"],
-            messages=[{"role": "user", "content": prompt_plan}],
-            keep_alive="30m",
-        )
-        contenido = res["message"]["content"]
-    try:
-        data = json.loads(contenido)
         acciones = data.get("acciones", [])
         if isinstance(acciones, list):
             return data.get("respuesta", ""), acciones
-    except json.JSONDecodeError:
+    except Exception:
         pass
     return "", []
 
@@ -3201,10 +3886,13 @@ def _resultado_es_fallido(linea):
         "error",
         "no pude",
         "no tengo",
+        "no encontré",
+        "no encontre",
         "ruta no encontrada",
         "url inválida",
         "url invalida",
         "api.example.com",
+        "invalid api key",
         "failed",
         "max retries exceeded",
     )
@@ -3244,6 +3932,23 @@ def procesar_prompt_sync(texto):
             guardar_mensaje_db("assistant", resp_local)
             registrar_ejecucion(solicitud_original, resp_local)
             return resp_local
+
+    if es_solicitud_auto_mejora(solicitud_original):
+        mejora_id, tipo, titulo_mejora, detalle_mejora, _ = crear_mejora_segura_desde_solicitud(
+            solicitud_original,
+            motivo="solicitud explícita del usuario",
+            origen="manual",
+        )
+        respuesta_mejora = (
+            f"Preparé una mejora segura #{mejora_id} para esto.\n\n"
+            f"Título: {titulo_mejora}\n"
+            f"Tipo: {tipo}\n"
+            f"Detalle: {detalle_mejora}\n\n"
+            "No toqué el código automáticamente. Puedes revisarla y autorizarla desde el panel `Mejoras`."
+        )
+        guardar_mensaje_db("assistant", respuesta_mejora)
+        registrar_ejecucion(solicitud_original, respuesta_mejora)
+        return respuesta_mejora
 
     if any(k in texto_l for k in ("aprende a hacerlo", "aprende hacerlo", "aprendelo", "apréndelo")):
         if not ULTIMA_SOLICITUD_USUARIO:
@@ -3340,10 +4045,9 @@ def procesar_prompt_sync(texto):
             ensure_ascii=False,
         )
 
-    try:
-        data = json.loads(respuesta_cruda)
-    except json.JSONDecodeError:
-        texto_plano = (respuesta_cruda or "").strip()
+    data = extraer_json_desde_texto(respuesta_cruda)
+    if not isinstance(data, dict):
+        texto_plano = str(respuesta_cruda or "").strip()
         data = {"respuesta": texto_plano or "No devolviste JSON útil.", "acciones": []}
 
     respuesta = data.get("respuesta", "").strip()
@@ -3399,6 +4103,22 @@ def procesar_prompt_sync(texto):
     respuesta_final = respuesta or "Sin respuesta de texto."
     if resultados:
         respuesta_final += "\n\n" + "\n".join(resultados)
+
+    fallo_respuesta = any(p in respuesta_final.lower() for p in NEGATIVE_PATTERNS) or "no encontré un plan ejecutable" in respuesta_final.lower()
+    if requiere_plan and (hubo_error or (not acciones and fallo_respuesta)):
+        mejora_id, tipo, titulo_mejora, detalle_mejora, _ = crear_mejora_segura_desde_solicitud(
+            solicitud_original,
+            motivo="fallo tras reintentos automáticos",
+            origen="fallo",
+        )
+        respuesta_final = construir_respuesta_respaldo(
+            solicitud_original,
+            motivo=detalle_mejora,
+            mejora_id=mejora_id,
+        )
+        respuesta_final += (
+            f"\n\nRegistré una mejora segura #{mejora_id} ({tipo}: {titulo_mejora}) para que puedas revisarla en el panel `Mejoras`."
+        )
 
     guardar_mensaje_db("assistant", respuesta_final)
     registrar_ejecucion(solicitud_original, respuesta_final)
@@ -3770,6 +4490,7 @@ def configurar_interfaz():
     global btn_settings
     global btn_guardar
     global btn_habilidades
+    global btn_mejoras
     global btn_automatizaciones
     global btn_integraciones
     global btn_key
@@ -4140,6 +4861,8 @@ def configurar_interfaz():
     tools_row.pack(fill="x")
     btn_habilidades = make_button(tools_row, "Habilidades", abrir_panel_habilidades)
     btn_habilidades.pack(side="left")
+    btn_mejoras = make_button(tools_row, "Mejoras", abrir_panel_mejoras)
+    btn_mejoras.pack(side="left", padx=(8, 0))
     btn_automatizaciones = make_button(tools_row, "Automatizaciones", abrir_panel_automatizaciones)
     btn_automatizaciones.pack(side="left", padx=(8, 0))
     btn_integraciones = make_button(tools_row, "Integraciones", abrir_panel_integraciones)

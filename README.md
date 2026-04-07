@@ -6,6 +6,7 @@ Proyecto de agente local con modo hibrido para trabajar con IA local o proveedor
 
 - Interfaz de escritorio en Tkinter.
 - Seleccion manual del proveedor: `local` o `api`.
+- Interfaz más limpia con panel de ajustes plegable y compositor de mensajes mejorado.
 - Ejecucion de herramientas locales para archivos, comandos, voz e integraciones.
 - Soporte para Ollama en local y Groq por API.
 - Orquestador HTTP operativo con endpoints `/health`, `/ask` y `/accion`.

@@ -122,6 +122,9 @@ style = None
 estado_var = None
 header = None
 titulo = None
+hero_subtitle_var = None
+provider_badge_var = None
+provider_badge = None
 tts_estado = None
 model_var = None
 combo_model = None
@@ -148,6 +151,9 @@ btn_key = None
 frame_chat = None
 canvas = None
 scrollable_frame = None
+settings_panel = None
+settings_visible = True
+btn_settings = None
 frame_input = None
 entrada = None
 btn_limpiar = None
@@ -1837,6 +1843,7 @@ def on_provider_change(_event=None):
     CONFIG["proveedor_ia"] = normalizar_proveedor_ia(provider_var.get())
     CONFIG["modelo_online"] = online_model_var.get()
     guardar_config(CONFIG)
+    actualizar_resumen_visual()
     estado_var.set(f"Proveedor fijo: {proveedor_ui_value(CONFIG['proveedor_ia'])}")
     chat_window.after(1200, lambda: estado_var.set("Listo"))
 
@@ -1857,12 +1864,12 @@ def alternar_compacto():
         chat_window.geometry(
             f"{CONFIG['compact_window_size']}+{chat_window.winfo_x()}+{chat_window.winfo_y()}"
         )
-        btn_compacto.configure(text="□")
+        btn_compacto.configure(text="Expandir")
     else:
         chat_window.geometry(
             f"{CONFIG['window_size']}+{chat_window.winfo_x()}+{chat_window.winfo_y()}"
         )
-        btn_compacto.configure(text="▣")
+        btn_compacto.configure(text="Compacto")
 
 def guardar_preferencias():
     CONFIG["model"] = model_var.get()
@@ -2416,34 +2423,163 @@ def abrir_panel_automatizaciones():
 def mensaje(texto, tipo):
     if scrollable_frame is None or chat_window is None or canvas is None:
         return
-    frame = tk.Frame(scrollable_frame, bg="#030712")
+    frame = tk.Frame(scrollable_frame, bg="#08111d")
+    frame.pack(fill="x", padx=18, pady=5)
 
     if tipo == "user":
-        color = "#1d4ed8"
+        role_txt = "Tú"
+        bubble_bg = "#2563eb"
+        meta_fg = "#bfdbfe"
+        body_fg = "#eff6ff"
         anchor = "e"
     elif tipo == "system":
-        color = "#334155"
+        role_txt = "Sistema"
+        bubble_bg = "#1e293b"
+        meta_fg = "#94a3b8"
+        body_fg = "#e2e8f0"
         anchor = "w"
     else:
-        color = "#0f172a"
+        role_txt = "Agente"
+        bubble_bg = "#0f172a"
+        meta_fg = "#7dd3fc"
+        body_fg = "#e5eefb"
         anchor = "w"
 
-    bubble = tk.Label(
-        frame,
+    bubble_wrap = max(300, min(chat_window.winfo_width() - 170, 620))
+    bubble = tk.Frame(frame, bg=bubble_bg, padx=14, pady=10)
+    bubble.pack(anchor=anchor)
+
+    meta = tk.Label(
+        bubble,
+        text=role_txt,
+        bg=bubble_bg,
+        fg=meta_fg,
+        font=("Segoe UI Semibold", 8),
+    )
+    meta.pack(anchor="w")
+
+    body = tk.Label(
+        bubble,
         text=texto,
-        bg=color,
-        fg="white",
-        wraplength=340,
-        padx=12,
-        pady=9,
+        bg=bubble_bg,
+        fg=body_fg,
+        wraplength=bubble_wrap,
         justify="left",
         font=("Segoe UI", 10),
+        padx=0,
+        pady=4,
     )
-    bubble.pack(anchor=anchor, padx=12, pady=6)
-    frame.pack(fill="both")
+    body.pack(anchor="w")
 
     chat_window.update_idletasks()
     canvas.yview_moveto(1)
+
+
+def obtener_texto_entrada():
+    if entrada is None:
+        return ""
+    if isinstance(entrada, tk.Text):
+        return entrada.get("1.0", "end-1c").strip()
+    return entrada.get().strip()
+
+
+def limpiar_entrada_ui():
+    if entrada is None:
+        return
+    if isinstance(entrada, tk.Text):
+        entrada.delete("1.0", tk.END)
+    else:
+        entrada.delete(0, tk.END)
+
+
+def poner_texto_entrada(texto):
+    if entrada is None:
+        return
+    limpiar_entrada_ui()
+    if isinstance(entrada, tk.Text):
+        entrada.insert("1.0", texto)
+    else:
+        entrada.insert(0, texto)
+    entrada.focus_set()
+
+
+def actualizar_resumen_visual():
+    if provider_badge_var is None:
+        return
+
+    provider = normalizar_proveedor_ia(provider_var.get() if provider_var is not None else CONFIG.get("proveedor_ia"))
+    provider_ui = proveedor_ui_value(provider)
+
+    if provider == "online":
+        provider_badge_var.set("API")
+        if provider_badge is not None:
+            provider_badge.configure(bg="#3f2a11", fg="#fde68a")
+        if combo_model is not None:
+            combo_model.configure(state="disabled")
+        if combo_online_model is not None:
+            combo_online_model.configure(state="readonly")
+        detalle = f"Modo manual activado. Ahora mismo usa API con {online_model_var.get()}."
+    else:
+        provider_badge_var.set("LOCAL")
+        if provider_badge is not None:
+            provider_badge.configure(bg="#163323", fg="#86efac")
+        if combo_model is not None:
+            combo_model.configure(state="readonly")
+        if combo_online_model is not None:
+            combo_online_model.configure(state="disabled")
+        detalle = f"Modo manual activado. Ahora mismo usa IA local con {model_var.get()}."
+
+    if hero_subtitle_var is not None:
+        hero_subtitle_var.set(detalle + " No cambiará de proveedor hasta que tú lo hagas.")
+    if titulo is not None:
+        titulo.configure(text=f"Agente IA híbrido · {provider_ui.upper()}")
+
+
+def alternar_panel_ajustes():
+    global settings_visible
+    if settings_panel is None or btn_settings is None:
+        return
+    settings_visible = not settings_visible
+    if settings_visible:
+        settings_panel.pack(fill="x", pady=(0, 14), after=header)
+        btn_settings.configure(text="Ocultar ajustes")
+    else:
+        settings_panel.pack_forget()
+        btn_settings.configure(text="Mostrar ajustes")
+
+
+def on_model_change(_event=None):
+    CONFIG["model"] = model_var.get()
+    guardar_config(CONFIG)
+    actualizar_resumen_visual()
+    estado_var.set("Modelo local actualizado")
+    chat_window.after(1200, lambda: estado_var.set("Listo"))
+
+
+def on_online_model_change(_event=None):
+    CONFIG["modelo_online"] = online_model_var.get()
+    guardar_config(CONFIG)
+    actualizar_resumen_visual()
+    estado_var.set("Modelo API actualizado")
+    chat_window.after(1200, lambda: estado_var.set("Listo"))
+
+
+def on_toggle_skills_auto():
+    CONFIG["usar_habilidades_auto"] = bool(skills_auto_var.get())
+    guardar_config(CONFIG)
+    estado_var.set("Aprendizaje automático actualizado")
+    chat_window.after(1200, lambda: estado_var.set("Listo"))
+
+
+def on_textbox_return(event):
+    return enviar(event)
+
+
+def on_textbox_shift_return(_event):
+    if entrada is None:
+        return "break"
+    entrada.insert(tk.INSERT, "\n")
+    return "break"
 
 def guardar_geometria_actual():
     if chat_window is None:
@@ -2473,7 +2609,7 @@ def compactar_si_inactivo():
         chat_window.geometry(
             f"{CONFIG['compact_window_size']}+{chat_window.winfo_x()}+{chat_window.winfo_y()}"
         )
-        btn_compacto.configure(text="□")
+        btn_compacto.configure(text="Expandir")
         guardar_geometria_actual()
 
 
@@ -2486,7 +2622,7 @@ def expandir_si_compacto():
         chat_window.geometry(
             f"{CONFIG['window_size']}+{chat_window.winfo_x()}+{chat_window.winfo_y()}"
         )
-        btn_compacto.configure(text="▣")
+        btn_compacto.configure(text="Compacto")
     programar_auto_compacto()
 
 
@@ -3341,10 +3477,10 @@ def _procesar_mensaje(texto):
 
 def enviar(event=None):
     expandir_si_compacto()
-    texto = entrada.get().strip()
-    entrada.delete(0, tk.END)
+    texto = obtener_texto_entrada()
+    limpiar_entrada_ui()
     if not texto:
-        return
+        return "break" if event is not None else None
 
     mensaje(texto, "user")
     guardar_mensaje_db("user", texto)
@@ -3361,6 +3497,7 @@ def enviar(event=None):
                 estado_var.set("Listo")
             chat_window.after(0, _post_err)
     threading.Thread(target=_worker, daemon=True).start()
+    return "break" if event is not None else None
 
 
 def escuchar_y_enviar():
@@ -3411,14 +3548,13 @@ def escuchar_y_enviar():
         def _post():
             global escucha_activa
             escucha_activa = False
-            btn_micro.configure(text="🎤", state="normal")
+            btn_micro.configure(text="Hablar", state="normal")
             if error:
                 estado_var.set(error)
                 chat_window.after(2200, lambda: estado_var.set("Listo"))
                 return
 
-            entrada.delete(0, tk.END)
-            entrada.insert(0, texto)
+            poner_texto_entrada(texto)
             estado_var.set(f"Texto reconocido ({mic_var.get() or 'predeterminado'})")
             chat_window.after(1200, lambda: estado_var.set("Listo"))
             enviar()
@@ -3448,6 +3584,9 @@ def configurar_interfaz():
     global estado_var
     global header
     global titulo
+    global hero_subtitle_var
+    global provider_badge_var
+    global provider_badge
     global tts_status_var
     global tts_estado
     global model_var
@@ -3467,6 +3606,7 @@ def configurar_interfaz():
     global skills_auto_var
     global chk_skills_auto
     global btn_compacto
+    global btn_settings
     global btn_guardar
     global btn_habilidades
     global btn_automatizaciones
@@ -3475,6 +3615,8 @@ def configurar_interfaz():
     global frame_chat
     global canvas
     global scrollable_frame
+    global settings_panel
+    global settings_visible
     global frame_input
     global entrada
     global btn_limpiar
@@ -3489,288 +3631,462 @@ def configurar_interfaz():
 
     root = tk.Tk()
     chat_window = root
-    chat_window.title("Agente IA")
+    chat_window.title("Agente IA híbrido")
+
+    size_actual = normalizar_window_size(CONFIG.get("window_size"))
+    m_size = re.match(r"^(\d+)x(\d+)$", size_actual)
+    if m_size:
+        ancho = max(760, int(m_size.group(1)))
+        alto = max(720, int(m_size.group(2)))
+        size_actual = f"{ancho}x{alto}"
+
     chat_window.geometry(
-        f"{CONFIG['window_size']}+{CONFIG.get('window_x', 1000)}+{CONFIG.get('window_y', 140)}"
+        f"{size_actual}+{CONFIG.get('window_x', 1000)}+{CONFIG.get('window_y', 140)}"
     )
-    chat_window.configure(bg="#060d1f")
-    chat_window.minsize(320, 420)
+    chat_window.configure(bg="#08111d")
+    chat_window.minsize(560, 620)
 
     style = ttk.Style()
     style.theme_use("clam")
-    style.configure("TCombobox", fieldbackground="#111827", foreground="white", arrowsize=13)
+    style.configure(
+        "TCombobox",
+        fieldbackground="#08111d",
+        foreground="#e2e8f0",
+        arrowsize=13,
+        borderwidth=0,
+        lightcolor="#111827",
+        darkcolor="#111827",
+    )
+    style.configure(
+        "Vertical.TScrollbar",
+        background="#1e293b",
+        troughcolor="#0b1220",
+        bordercolor="#0b1220",
+        arrowcolor="#cbd5e1",
+    )
+    style.configure(
+        "Treeview",
+        background="#0b1220",
+        foreground="#e2e8f0",
+        fieldbackground="#0b1220",
+        rowheight=26,
+    )
+    style.configure(
+        "Treeview.Heading",
+        background="#111827",
+        foreground="#e2e8f0",
+        relief="flat",
+    )
 
     chat_compacto = False
     auto_compact_job = None
+    settings_visible = True
 
-    header = tk.Frame(chat_window, bg="#0f172a", height=48)
-    header.pack(fill="x")
+    def make_button(parent, text, command, variant="ghost", padx=12):
+        palette = {
+            "ghost": {"bg": "#111827", "fg": "#cbd5e1"},
+            "primary": {"bg": "#2563eb", "fg": "#eff6ff"},
+            "accent": {"bg": "#0f766e", "fg": "#ecfeff"},
+        }
+        colors = palette.get(variant, palette["ghost"])
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=colors["bg"],
+            fg=colors["fg"],
+            activebackground=colors["bg"],
+            activeforeground=colors["fg"],
+            relief="flat",
+            bd=0,
+            padx=padx,
+            pady=7,
+            font=("Segoe UI Semibold", 9),
+            cursor="hand2",
+        )
+
+    shell = tk.Frame(chat_window, bg="#08111d")
+    shell.pack(fill="both", expand=True, padx=16, pady=16)
+
+    header = tk.Frame(shell, bg="#0f172a", padx=18, pady=18)
+    header.pack(fill="x", pady=(0, 14))
+
+    hero_top = tk.Frame(header, bg="#0f172a")
+    hero_top.pack(fill="x")
+
+    left_col = tk.Frame(hero_top, bg="#0f172a")
+    left_col.pack(side="left", fill="x", expand=True)
 
     titulo = tk.Label(
-        header,
-        text="Asistente IA · modo manual",
+        left_col,
+        text="Agente IA híbrido",
         bg="#0f172a",
-        fg="#e2e8f0",
-        font=("Segoe UI Semibold", 11),
+        fg="#f8fafc",
+        font=("Segoe UI Semibold", 16),
     )
-    titulo.pack(side="left", padx=10)
+    titulo.pack(anchor="w")
+
+    hero_subtitle_var = tk.StringVar(value="Modo manual activado.")
+    tk.Label(
+        left_col,
+        textvariable=hero_subtitle_var,
+        bg="#0f172a",
+        fg="#94a3b8",
+        justify="left",
+        wraplength=520,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(4, 0))
+
+    right_col = tk.Frame(hero_top, bg="#0f172a")
+    right_col.pack(side="right", anchor="ne")
+
+    provider_badge_var = tk.StringVar(value="LOCAL")
+    provider_badge = tk.Label(
+        right_col,
+        textvariable=provider_badge_var,
+        bg="#163323",
+        fg="#86efac",
+        padx=10,
+        pady=5,
+        font=("Segoe UI Semibold", 9),
+    )
+    provider_badge.pack(anchor="e")
 
     estado_var = tk.StringVar(value="Listo")
-    estado = tk.Label(
-        header, textvariable=estado_var, bg="#0f172a", fg="#94a3b8", font=("Segoe UI", 9)
-    )
-    estado.pack(side="left")
+    tk.Label(
+        right_col,
+        textvariable=estado_var,
+        bg="#111827",
+        fg="#e2e8f0",
+        padx=10,
+        pady=5,
+        font=("Segoe UI Semibold", 9),
+    ).pack(anchor="e", pady=(8, 4))
 
     tts_status_var = tk.StringVar(value="🛑 silencio")
     tts_estado = tk.Label(
-        header,
+        right_col,
         textvariable=tts_status_var,
         bg="#0f172a",
         fg="#60a5fa",
         font=("Segoe UI", 9),
     )
-    tts_estado.pack(side="left", padx=8)
+    tts_estado.pack(anchor="e")
 
-    model_var = tk.StringVar(value=CONFIG["model"])
-    combo_model = ttk.Combobox(
-        header,
-        textvariable=model_var,
-        values=["qwen2.5:7b", "llama3.1:8b", "mistral:7b", "phi3:mini"],
+    action_row = tk.Frame(header, bg="#0f172a")
+    action_row.pack(fill="x", pady=(16, 0))
+
+    btn_settings = make_button(action_row, "Ocultar ajustes", alternar_panel_ajustes)
+    btn_settings.pack(side="left")
+
+    btn_guardar = make_button(action_row, "Guardar", guardar_preferencias, variant="primary")
+    btn_guardar.pack(side="right")
+
+    btn_compacto = make_button(action_row, "Compacto", alternar_compacto, padx=10)
+    btn_compacto.pack(side="right", padx=(0, 8))
+
+    settings_panel = tk.Frame(shell, bg="#111827", padx=18, pady=18)
+    settings_panel.pack(fill="x", pady=(0, 14))
+
+    tk.Label(
+        settings_panel,
+        text="Control manual de ejecución",
+        bg="#111827",
+        fg="#f8fafc",
+        font=("Segoe UI Semibold", 11),
+    ).pack(anchor="w")
+    tk.Label(
+        settings_panel,
+        text="Aquí eliges tú si el agente trabaja con IA local o con API. El proveedor activo no cambia solo.",
+        bg="#111827",
+        fg="#94a3b8",
+        wraplength=760,
+        justify="left",
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(4, 12))
+
+    row_provider = tk.Frame(settings_panel, bg="#111827")
+    row_provider.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        row_provider,
+        text="Proveedor",
+        width=16,
+        anchor="w",
+        bg="#111827",
+        fg="#cbd5e1",
+        font=("Segoe UI Semibold", 9),
+    ).pack(side="left")
+    provider_var = tk.StringVar(value=proveedor_ui_value(CONFIG.get("proveedor_ia", "local")))
+    combo_provider = ttk.Combobox(
+        row_provider,
+        textvariable=provider_var,
+        values=["local", "api"],
         width=12,
         state="readonly",
     )
-    combo_model.pack(side="right", padx=8, pady=8)
+    combo_provider.pack(side="left")
 
-    provider_var = tk.StringVar(value=proveedor_ui_value(CONFIG.get("proveedor_ia", "local")))
-    combo_provider = ttk.Combobox(
-        header,
-        textvariable=provider_var,
-        values=["local", "api"],
-        width=8,
+    row_model_local = tk.Frame(settings_panel, bg="#111827")
+    row_model_local.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        row_model_local,
+        text="Modelo local",
+        width=16,
+        anchor="w",
+        bg="#111827",
+        fg="#cbd5e1",
+        font=("Segoe UI Semibold", 9),
+    ).pack(side="left")
+    model_var = tk.StringVar(value=CONFIG["model"])
+    combo_model = ttk.Combobox(
+        row_model_local,
+        textvariable=model_var,
+        values=["qwen2.5:7b", "llama3.1:8b", "mistral:7b", "phi3:mini"],
+        width=24,
         state="readonly",
     )
-    combo_provider.pack(side="right", padx=4, pady=8)
+    combo_model.pack(side="left", fill="x", expand=True)
 
+    row_model_api = tk.Frame(settings_panel, bg="#111827")
+    row_model_api.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        row_model_api,
+        text="Modelo API",
+        width=16,
+        anchor="w",
+        bg="#111827",
+        fg="#cbd5e1",
+        font=("Segoe UI Semibold", 9),
+    ).pack(side="left")
     online_model_var = tk.StringVar(value=CONFIG.get("modelo_online", "llama-3.1-8b-instant"))
     combo_online_model = ttk.Combobox(
-        header,
+        row_model_api,
         textvariable=online_model_var,
         values=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
-        width=22,
+        width=30,
         state="readonly",
     )
-    combo_online_model.pack(side="right", padx=4, pady=8)
+    combo_online_model.pack(side="left", fill="x", expand=True)
 
+    row_voice = tk.Frame(settings_panel, bg="#111827")
+    row_voice.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        row_voice,
+        text="Voz",
+        width=16,
+        anchor="w",
+        bg="#111827",
+        fg="#cbd5e1",
+        font=("Segoe UI Semibold", 9),
+    ).pack(side="left")
+    voz_var = tk.BooleanVar(value=CONFIG["voz_activa"])
+    chk_voz = tk.Checkbutton(
+        row_voice,
+        text="Activada",
+        variable=voz_var,
+        command=on_toggle_voz,
+        bg="#111827",
+        fg="#cbd5e1",
+        selectcolor="#1f2937",
+        activebackground="#111827",
+        activeforeground="#cbd5e1",
+        font=("Segoe UI", 9),
+    )
+    chk_voz.pack(side="left", padx=(0, 10))
+
+    voz_style_var = tk.StringVar(value=CONFIG.get("voz_style", "Natural"))
+    combo_voz_style = ttk.Combobox(
+        row_voice,
+        textvariable=voz_style_var,
+        values=["Natural", "Suave", "Profunda", "Femenina", "Masculina"],
+        width=14,
+        state="readonly",
+    )
+    combo_voz_style.pack(side="left", padx=(0, 8))
+
+    voz_speed_var = tk.StringVar(value=CONFIG.get("voz_speed_label", "Normal"))
+    combo_voz_speed = ttk.Combobox(
+        row_voice,
+        textvariable=voz_speed_var,
+        values=["Lenta", "Normal", "Rápida"],
+        width=12,
+        state="readonly",
+    )
+    combo_voz_speed.pack(side="left")
+
+    row_mic = tk.Frame(settings_panel, bg="#111827")
+    row_mic.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        row_mic,
+        text="Micrófono",
+        width=16,
+        anchor="w",
+        bg="#111827",
+        fg="#cbd5e1",
+        font=("Segoe UI Semibold", 9),
+    ).pack(side="left")
     mic_names = listar_microfonos()
     mic_var = tk.StringVar(value=CONFIG.get("voz_entrada_microfono", ""))
     combo_mic = ttk.Combobox(
-        header,
+        row_mic,
         textvariable=mic_var,
         values=mic_names,
-        width=26,
+        width=34,
         state="readonly" if mic_names else "disabled",
     )
     if not mic_var.get() and mic_names:
         mic_var.set(mic_names[0])
-    combo_mic.pack(side="right", padx=4, pady=8)
+    combo_mic.pack(side="left", fill="x", expand=True)
 
-    voz_style_var = tk.StringVar(value=CONFIG.get("voz_style", "Natural"))
-    combo_voz_style = ttk.Combobox(
-        header,
-        textvariable=voz_style_var,
-        values=["Natural", "Suave", "Profunda", "Femenina", "Masculina"],
-        width=10,
-        state="readonly",
-    )
-    combo_voz_style.pack(side="right", padx=4, pady=8)
+    btn_refresh_mic = make_button(row_mic, "Actualizar", refrescar_microfonos, padx=10)
+    btn_refresh_mic.pack(side="left", padx=(8, 0))
 
-    voz_speed_var = tk.StringVar(value=CONFIG.get("voz_speed_label", "Normal"))
-    combo_voz_speed = ttk.Combobox(
-        header,
-        textvariable=voz_speed_var,
-        values=["Lenta", "Normal", "Rápida"],
-        width=8,
-        state="readonly",
-    )
-    combo_voz_speed.pack(side="right", padx=4, pady=8)
-
-    voz_var = tk.BooleanVar(value=CONFIG["voz_activa"])
-    chk_voz = tk.Checkbutton(
-        header,
-        text="Voz",
-        variable=voz_var,
-        command=on_toggle_voz,
-        bg="#0f172a",
+    row_learning = tk.Frame(settings_panel, bg="#111827")
+    row_learning.pack(fill="x", pady=(0, 10))
+    tk.Label(
+        row_learning,
+        text="Atajos",
+        width=16,
+        anchor="w",
+        bg="#111827",
         fg="#cbd5e1",
-        selectcolor="#1f2937",
-        activebackground="#0f172a",
-        activeforeground="#cbd5e1",
-        font=("Segoe UI", 9),
-    )
-    chk_voz.pack(side="right")
-
+        font=("Segoe UI Semibold", 9),
+    ).pack(side="left")
     skills_auto_var = tk.BooleanVar(value=bool(CONFIG.get("usar_habilidades_auto", False)))
     chk_skills_auto = tk.Checkbutton(
-        header,
-        text="AutoSkills",
+        row_learning,
+        text="Aprender ejecuciones exitosas",
         variable=skills_auto_var,
-        bg="#0f172a",
+        command=on_toggle_skills_auto,
+        bg="#111827",
         fg="#cbd5e1",
         selectcolor="#1f2937",
-        activebackground="#0f172a",
+        activebackground="#111827",
         activeforeground="#cbd5e1",
         font=("Segoe UI", 9),
     )
-    chk_skills_auto.pack(side="right", padx=4)
+    chk_skills_auto.pack(side="left")
 
-    btn_compacto = tk.Button(
-        header,
-        text="▣",
-        command=alternar_compacto,
+    tk.Label(
+        settings_panel,
+        text="Gestión rápida",
         bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=7,
-    )
-    btn_compacto.pack(side="right", padx=4)
+        fg="#94a3b8",
+        font=("Segoe UI Semibold", 9),
+    ).pack(anchor="w", pady=(8, 6))
 
-    btn_guardar = tk.Button(
-        header,
-        text="Guardar",
-        command=guardar_preferencias,
-        bg="#1d4ed8",
+    tools_row = tk.Frame(settings_panel, bg="#111827")
+    tools_row.pack(fill="x")
+    btn_habilidades = make_button(tools_row, "Habilidades", abrir_panel_habilidades)
+    btn_habilidades.pack(side="left")
+    btn_automatizaciones = make_button(tools_row, "Automatizaciones", abrir_panel_automatizaciones)
+    btn_automatizaciones.pack(side="left", padx=(8, 0))
+    btn_integraciones = make_button(tools_row, "Integraciones", abrir_panel_integraciones)
+    btn_integraciones.pack(side="left", padx=(8, 0))
+    btn_key = make_button(tools_row, "Groq Key", pedir_api_key_groq, variant="accent")
+    btn_key.pack(side="left", padx=(8, 0))
+
+    chat_card = tk.Frame(shell, bg="#0b1220", padx=12, pady=12)
+    chat_card.pack(fill="both", expand=True, pady=(0, 14))
+
+    chat_head = tk.Frame(chat_card, bg="#0b1220")
+    chat_head.pack(fill="x", padx=6, pady=(4, 8))
+    tk.Label(
+        chat_head,
+        text="Conversación",
+        bg="#0b1220",
         fg="#f8fafc",
-        relief="flat",
-        padx=10,
-    )
-    btn_guardar.pack(side="right", padx=6)
+        font=("Segoe UI Semibold", 11),
+    ).pack(anchor="w")
+    tk.Label(
+        chat_head,
+        text="El proveedor se mantiene fijo hasta que cambies el selector manual.",
+        bg="#0b1220",
+        fg="#64748b",
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(3, 0))
 
-    btn_habilidades = tk.Button(
-        header,
-        text="Habilidades",
-        command=abrir_panel_habilidades,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_habilidades.pack(side="right", padx=6)
-
-    btn_automatizaciones = tk.Button(
-        header,
-        text="Automatizaciones",
-        command=abrir_panel_automatizaciones,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_automatizaciones.pack(side="right", padx=6)
-
-    btn_integraciones = tk.Button(
-        header,
-        text="Integraciones",
-        command=abrir_panel_integraciones,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_integraciones.pack(side="right", padx=6)
-
-    btn_key = tk.Button(
-        header,
-        text="Groq Key",
-        command=pedir_api_key_groq,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_key.pack(side="right", padx=6)
-
-    frame_chat = tk.Frame(chat_window, bg="#030712")
+    frame_chat = tk.Frame(chat_card, bg="#08111d")
     frame_chat.pack(fill="both", expand=True)
 
-    canvas = tk.Canvas(frame_chat, bg="#030712", highlightthickness=0)
+    canvas = tk.Canvas(frame_chat, bg="#08111d", highlightthickness=0, bd=0)
     scrollbar = ttk.Scrollbar(
         frame_chat, orient="vertical", style="Vertical.TScrollbar", command=canvas.yview
     )
-    scrollable_frame = tk.Frame(canvas, bg="#030712")
-    scrollable_frame.bind(
-        "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    )
-    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    scrollable_frame = tk.Frame(canvas, bg="#08111d")
+    scroll_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+    def _sync_scrollregion(_event=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def _sync_width(_event=None):
+        canvas.itemconfigure(scroll_window, width=canvas.winfo_width())
+
+    scrollable_frame.bind("<Configure>", _sync_scrollregion)
+    canvas.bind("<Configure>", _sync_width)
     canvas.configure(yscrollcommand=scrollbar.set)
     canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
 
-    frame_input = tk.Frame(chat_window, bg="#030712")
+    frame_input = tk.Frame(shell, bg="#0f172a", padx=16, pady=16)
     frame_input.pack(fill="x")
 
-    entrada = tk.Entry(
+    tk.Label(
         frame_input,
-        bg="#111827",
+        text="Escribe una instrucción para tu agente",
+        bg="#0f172a",
+        fg="#f8fafc",
+        font=("Segoe UI Semibold", 11),
+    ).pack(anchor="w")
+    tk.Label(
+        frame_input,
+        text="Enter envía. Shift+Enter inserta una nueva línea. El modo local/api siempre lo eliges tú.",
+        bg="#0f172a",
+        fg="#94a3b8",
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", pady=(3, 8))
+
+    entrada = tk.Text(
+        frame_input,
+        height=3,
+        wrap="word",
+        bg="#08111d",
         fg="#e2e8f0",
         insertbackground="#e2e8f0",
+        relief="flat",
+        bd=0,
+        padx=12,
+        pady=10,
         font=("Segoe UI", 11),
-        relief="flat",
     )
-    entrada.pack(side="left", fill="x", expand=True, padx=10, pady=10, ipady=5)
+    entrada.pack(fill="x")
 
-    btn_limpiar = tk.Button(
-        frame_input,
-        text="Limpiar",
-        command=limpiar_historial,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_limpiar.pack(side="left", padx=5)
+    composer_actions = tk.Frame(frame_input, bg="#0f172a")
+    composer_actions.pack(fill="x", pady=(10, 0))
 
-    btn_micro = tk.Button(
-        frame_input,
-        text="🎤",
-        command=escuchar_y_enviar,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_micro.pack(side="left", padx=5)
+    btn_limpiar = make_button(composer_actions, "Limpiar", limpiar_historial, padx=10)
+    btn_limpiar.pack(side="left")
 
-    btn_refresh_mic = tk.Button(
-        frame_input,
-        text="Mic",
-        command=refrescar_microfonos,
-        bg="#111827",
-        fg="#cbd5e1",
-        relief="flat",
-        padx=10,
-    )
-    btn_refresh_mic.pack(side="left", padx=5)
+    btn_micro = make_button(composer_actions, "Hablar", escuchar_y_enviar, padx=10)
+    btn_micro.pack(side="left", padx=(8, 0))
 
-    btn_enviar = tk.Button(
-        frame_input,
-        text="Enviar",
-        command=enviar,
-        bg="#1d4ed8",
-        fg="#f8fafc",
-        relief="flat",
-        padx=14,
-    )
-    btn_enviar.pack(side="right", padx=10)
+    btn_enviar = make_button(composer_actions, "Enviar", enviar, variant="primary", padx=16)
+    btn_enviar.pack(side="right")
 
-    entrada.bind("<Return>", enviar)
+    entrada.bind("<Return>", on_textbox_return)
+    entrada.bind("<Shift-Return>", on_textbox_shift_return)
+    combo_model.bind("<<ComboboxSelected>>", on_model_change)
     combo_voz_style.bind("<<ComboboxSelected>>", on_voice_ui_change)
     combo_voz_speed.bind("<<ComboboxSelected>>", on_voice_ui_change)
     combo_provider.bind("<<ComboboxSelected>>", on_provider_change)
-    combo_online_model.bind("<<ComboboxSelected>>", on_provider_change)
+    combo_online_model.bind("<<ComboboxSelected>>", on_online_model_change)
     combo_mic.bind("<<ComboboxSelected>>", on_mic_change)
     chat_window.bind("<FocusIn>", lambda e: expandir_si_compacto())
     chat_window.bind("<Configure>", lambda e: guardar_geometria_actual())
     chat_window.protocol("WM_DELETE_WINDOW", cerrar_app)
+
+    actualizar_resumen_visual()
+    entrada.focus_set()
 
     return chat_window
 

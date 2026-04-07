@@ -1624,19 +1624,82 @@ def ejecutar_cmd(cmd=None):
 # ========================
 # IA
 # ========================
-def chat_online_groq(prompt_sistema, prompt_usuario):
-    api_key = (CONFIG.get("groq_api_key") or "") or os.environ.get("GROQ_API_KEY", "")
-    api_key = (
-        api_key.replace("\ufeff", "")
+def limpiar_groq_api_key(raw):
+    texto = str(raw or "")
+    texto = (
+        texto.replace("\ufeff", "")
         .replace("\u200b", "")
         .replace("\r", "")
-        .replace("\n", "")
+        .replace("\n", " ")
         .strip()
     )
+    if not texto:
+        return ""
+    texto = texto.strip("\"'").strip()
+    if texto.lower().startswith("bearer "):
+        texto = texto[7:].strip()
+    match = re.search(r"gsk_[A-Za-z0-9._-]+", texto)
+    if match:
+        return match.group(0)
+    if "=" in texto and texto.count("=") == 1:
+        _, right = texto.split("=", 1)
+        texto = right.strip().strip("\"'")
+    return texto.strip()
+
+
+def obtener_groq_api_key(api_key_override=None):
+    candidato = api_key_override
+    if candidato is None:
+        candidato = (CONFIG.get("groq_api_key") or "") or os.environ.get("GROQ_API_KEY", "")
+    api_key = limpiar_groq_api_key(candidato)
     if not api_key:
         raise RuntimeError("Falta GROQ_API_KEY. Configúrala en la app o variable de entorno.")
     if not api_key.startswith("gsk_"):
         raise RuntimeError("La API key de Groq no tiene formato válido (debe iniciar con gsk_).")
+    return api_key
+
+
+def validar_groq_api_key(api_key_override=None, timeout=20):
+    try:
+        api_key = obtener_groq_api_key(api_key_override)
+    except Exception as ex:
+        return False, str(ex), ""
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.get("https://api.groq.com/openai/v1/models", headers=headers, timeout=timeout)
+    except requests.RequestException as ex:
+        return False, f"No se pudo conectar a Groq: {ex}", api_key
+
+    if r.status_code == 200:
+        try:
+            data = r.json()
+            total = len(data.get("data", []))
+            return True, f"Key válida. Groq respondió correctamente ({total} modelos visibles).", api_key
+        except Exception:
+            return True, "Key válida. Groq respondió correctamente.", api_key
+
+    detalle = ""
+    try:
+        detalle = r.json().get("error", {}).get("message", "") or r.text[:240]
+    except Exception:
+        detalle = r.text[:240]
+
+    if r.status_code == 401:
+        return (
+            False,
+            "Groq rechazó la clave con 401 Invalid API Key. La app sí la leyó, pero esa key no está activa o no corresponde a Groq.",
+            api_key,
+        )
+
+    return False, f"Groq {r.status_code}: {detalle}", api_key
+
+
+def chat_online_groq(prompt_sistema, prompt_usuario):
+    api_key = obtener_groq_api_key()
 
     model_online = CONFIG.get("modelo_online", "llama-3.1-8b-instant")
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -2068,7 +2131,7 @@ def abrir_panel_habilidades():
 def pedir_api_key_groq():
     panel = tk.Toplevel(chat_window)
     panel.title("Configurar Groq API Key")
-    panel.geometry("560x170")
+    panel.geometry("620x250")
     panel.configure(bg="#030712")
 
     tk.Label(
@@ -2078,6 +2141,14 @@ def pedir_api_key_groq():
         fg="#e2e8f0",
         font=("Segoe UI", 10),
     ).pack(anchor="w", padx=12, pady=(12, 6))
+
+    tk.Label(
+        panel,
+        text="Acepta claves con formato `gsk_...`, incluso si pegas `Bearer ...` o `GROQ_API_KEY=...`.",
+        bg="#030712",
+        fg="#94a3b8",
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=12, pady=(0, 8))
 
     key_entry = tk.Entry(
         panel,
@@ -2091,40 +2162,130 @@ def pedir_api_key_groq():
     key_entry.pack(fill="x", padx=12, ipady=5)
     key_entry.insert(0, CONFIG.get("groq_api_key", ""))
 
-    def guardar_key():
-        raw = key_entry.get() or ""
-        key_clean = (
-            raw.replace("\ufeff", "")
-            .replace("\u200b", "")
-            .replace("\r", "")
-            .replace("\n", "")
-            .strip()
-        )
-        CONFIG["groq_api_key"] = key_clean
-        guardar_config(CONFIG)
+    status_var_panel = tk.StringVar(value="Pega la key y usa 'Probar key' antes de guardarla.")
+    status_lbl = tk.Label(
+        panel,
+        textvariable=status_var_panel,
+        bg="#030712",
+        fg="#94a3b8",
+        justify="left",
+        wraplength=590,
+        font=("Segoe UI", 9),
+    )
+    status_lbl.pack(anchor="w", padx=12, pady=(10, 4))
+
+    def set_panel_status(texto, ok=None):
+        status_var_panel.set(texto)
+        if ok is True:
+            status_lbl.configure(fg="#86efac")
+        elif ok is False:
+            status_lbl.configure(fg="#fca5a5")
+        else:
+            status_lbl.configure(fg="#94a3b8")
+
+    def alternar_visible():
+        if key_entry.cget("show") == "*":
+            key_entry.configure(show="")
+            btn_toggle.configure(text="Ocultar")
+        else:
+            key_entry.configure(show="*")
+            btn_toggle.configure(text="Mostrar")
+
+    def pegar_portapapeles():
         try:
-            # Validación en caliente para evitar guardar una key rota sin avisar.
-            chat_online_groq(
-                "Valida conectividad y responde JSON.",
-                'Responde EXACTO: {"respuesta":"ok","acciones":[]}',
+            raw_clip = panel.clipboard_get()
+        except tk.TclError:
+            set_panel_status("No encontré texto en el portapapeles.", ok=False)
+            return
+        key_clean = limpiar_groq_api_key(raw_clip)
+        key_entry.delete(0, tk.END)
+        key_entry.insert(0, key_clean)
+        if key_clean.startswith("gsk_"):
+            set_panel_status("Key detectada en el portapapeles. Ya puedes probarla.", ok=True)
+        else:
+            set_panel_status("No encontré una key de Groq válida en el texto pegado.", ok=False)
+
+    def probar_key():
+        raw = key_entry.get() or ""
+        key_clean = limpiar_groq_api_key(raw)
+        key_entry.delete(0, tk.END)
+        key_entry.insert(0, key_clean)
+        set_panel_status("Probando conectividad con Groq...", ok=None)
+        panel.update_idletasks()
+        ok, detalle, key_validada = validar_groq_api_key(key_clean)
+        if ok:
+            set_panel_status(detalle, ok=True)
+            return True, key_validada
+        set_panel_status(detalle, ok=False)
+        return False, key_validada
+
+    def guardar_key():
+        ok, key_validada = probar_key()
+        if not ok:
+            messagebox.showerror(
+                "Groq API Key",
+                "La key no se guardó porque Groq la rechazó o no tiene formato correcto.\n\n"
+                + status_var_panel.get(),
+                parent=panel,
             )
-            estado_var.set("Groq conectado")
-            chat_window.after(1400, lambda: estado_var.set("Listo"))
-            panel.destroy()
-        except Exception as ex:
-            messagebox.showerror("Groq API Key", f"Key guardada pero inválida/no usable:\n{ex}", parent=panel)
             estado_var.set("Error en key Groq")
             chat_window.after(1800, lambda: estado_var.set("Listo"))
+            return
 
-    tk.Button(
-        panel,
+        CONFIG["groq_api_key"] = key_validada
+        guardar_config(CONFIG)
+        actualizar_resumen_visual()
+        estado_var.set("Groq conectado")
+        chat_window.after(1400, lambda: estado_var.set("Listo"))
+        messagebox.showinfo("Groq API Key", "Key validada y guardada correctamente.", parent=panel)
+        panel.destroy()
+
+    acciones = tk.Frame(panel, bg="#030712")
+    acciones.pack(fill="x", padx=12, pady=10)
+
+    btn_pegar = tk.Button(
+        acciones,
+        text="Pegar",
+        command=pegar_portapapeles,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=12,
+    )
+    btn_pegar.pack(side="left")
+
+    btn_toggle = tk.Button(
+        acciones,
+        text="Mostrar",
+        command=alternar_visible,
+        bg="#111827",
+        fg="#cbd5e1",
+        relief="flat",
+        padx=12,
+    )
+    btn_toggle.pack(side="left", padx=(8, 0))
+
+    btn_probar = tk.Button(
+        acciones,
+        text="Probar key",
+        command=probar_key,
+        bg="#0f766e",
+        fg="#f8fafc",
+        relief="flat",
+        padx=12,
+    )
+    btn_probar.pack(side="right")
+
+    btn_guardar = tk.Button(
+        acciones,
         text="Guardar key",
         command=guardar_key,
         bg="#1d4ed8",
         fg="#f8fafc",
         relief="flat",
         padx=12,
-    ).pack(anchor="e", padx=12, pady=12)
+    )
+    btn_guardar.pack(side="right", padx=(0, 8))
 
 
 def abrir_panel_integraciones():

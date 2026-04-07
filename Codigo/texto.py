@@ -57,6 +57,8 @@ DEFAULT_CONFIG = {
     "orquestador_url": "http://127.0.0.1:8765",
     "orquestador_token": "",
     "usar_habilidades_auto": True,
+    "usar_objetivos_inteligentes": True,
+    "prompt_mejoras": [],
     "known_paths": {},
     "window_size": "520x760",
     "compact_window_size": "340x520",
@@ -147,6 +149,8 @@ voz_var = None
 chk_voz = None
 skills_auto_var = None
 chk_skills_auto = None
+objectives_var = None
+chk_objectives = None
 btn_compacto = None
 btn_guardar = None
 btn_habilidades = None
@@ -366,6 +370,32 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS objetivos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                solicitud TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'pendiente',
+                resultado TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS objetivo_pasos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                objetivo_id INTEGER NOT NULL,
+                paso_numero INTEGER NOT NULL,
+                titulo TEXT NOT NULL,
+                instruccion TEXT NOT NULL,
+                acciones_json TEXT NOT NULL,
+                resultado TEXT NOT NULL,
+                exito INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         # Migración desde esquema legado (prompt/respuesta/created_at)
         cols = [r[1] for r in conn.execute("PRAGMA table_info(conversaciones)").fetchall()]
         expected = {"fecha", "rol", "texto"}
@@ -473,6 +503,18 @@ def construir_resumen_contexto(memoria, max_chars=1600):
     if len(out) > max_chars:
         out = out[-max_chars:]
     return out
+
+
+def obtener_prompt_mejoras_activas():
+    reglas = CONFIG.get("prompt_mejoras", [])
+    if not isinstance(reglas, list):
+        return []
+    limpias = []
+    for regla in reglas:
+        txt = str(regla or "").strip()
+        if txt:
+            limpias.append(txt[:400])
+    return limpias[:24]
 
 
 def limpiar_historial_db():
@@ -945,13 +987,28 @@ def aplicar_mejora_segura(mejora_id):
     payload = propuesta.get("propuesta", propuesta) if isinstance(propuesta, dict) else {}
 
     if tipo == "habilidad":
-        trigger = str(payload.get("trigger_texto") or solicitud or titulo).strip()
-        acciones = payload.get("acciones", [])
-        if not trigger or not isinstance(acciones, list) or not acciones:
-            return False, "La mejora no trae una habilidad aplicable."
-        guardar_habilidad(trigger, acciones)
+        habilidades_payload = payload.get("habilidades", [])
+        habilidades_aplicables = []
+        if isinstance(habilidades_payload, list):
+            for item in habilidades_payload[:12]:
+                if not isinstance(item, dict):
+                    continue
+                trigger_item = str(item.get("trigger_texto") or "").strip()
+                acciones_item = item.get("acciones", [])
+                if trigger_item and isinstance(acciones_item, list) and acciones_item:
+                    habilidades_aplicables.append((trigger_item, acciones_item))
+        if not habilidades_aplicables:
+            trigger = str(payload.get("trigger_texto") or solicitud or titulo).strip()
+            acciones = payload.get("acciones", [])
+            if not trigger or not isinstance(acciones, list) or not acciones:
+                return False, "La mejora no trae una habilidad aplicable."
+            habilidades_aplicables = [(trigger, acciones)]
+        for trigger, acciones in habilidades_aplicables:
+            guardar_habilidad(trigger, acciones)
         actualizar_estado_mejora_segura(mejora_id, "aplicada")
-        return True, f"Habilidad aplicada: {trigger}"
+        if len(habilidades_aplicables) == 1:
+            return True, f"Habilidad aplicada: {habilidades_aplicables[0][0]}"
+        return True, f"Se aplicaron {len(habilidades_aplicables)} habilidades seguras."
 
     if tipo == "automatizacion":
         nombre = str(payload.get("nombre") or titulo or "Automatización segura").strip()
@@ -972,6 +1029,7 @@ def aplicar_mejora_segura(mejora_id):
             return False, "La mejora no trae cambios de configuración aplicables."
         permitidas = {
             "usar_habilidades_auto",
+            "usar_objetivos_inteligentes",
             "proveedor_ia",
             "modelo_online",
             "model",
@@ -995,9 +1053,273 @@ def aplicar_mejora_segura(mejora_id):
         actualizar_estado_mejora_segura(mejora_id, "aplicada")
         return True, "Configuración aplicada: " + ", ".join(aplicadas)
 
+    if tipo == "prompt":
+        reglas = payload.get("prompt_rules", [])
+        if isinstance(reglas, str):
+            reglas = [reglas]
+        if not isinstance(reglas, list) or not reglas:
+            regla_fallback = str(payload.get("objetivo") or detalle or "").strip()
+            reglas = [regla_fallback] if regla_fallback else []
+        limpias = [str(r or "").strip()[:400] for r in reglas if str(r or "").strip()]
+        if not limpias:
+            return False, "La mejora no trae reglas de prompt aplicables."
+        actuales = obtener_prompt_mejoras_activas()
+        for regla in limpias:
+            if regla not in actuales:
+                actuales.append(regla)
+        CONFIG["prompt_mejoras"] = actuales[:24]
+        guardar_config(CONFIG)
+        actualizar_estado_mejora_segura(mejora_id, "aplicada")
+        return True, "Mejora de prompt aplicada."
+
     destino = _exportar_mejora_codigo(mejora_id, titulo, detalle, propuesta)
     actualizar_estado_mejora_segura(mejora_id, "aprobada")
     return True, f"Mejora aprobada y exportada para revisión en: {destino}"
+
+
+def construir_bloque_prompt_mejoras():
+    reglas = obtener_prompt_mejoras_activas()
+    if not reglas:
+        return ""
+    lineas = ["Mejoras de prompt aprobadas y activas:"]
+    for regla in reglas:
+        lineas.append(f"- {regla}")
+    return "\n".join(lineas)
+
+
+def construir_instruccion_reintento_objetivo(solicitud, instruccion, intento):
+    if intento <= 1:
+        return str(instruccion or "").strip()
+    partes = [str(instruccion or "").strip()]
+    partes.append(
+        f"Reintento {intento}. Mantén el objetivo principal: {str(solicitud or '').strip()[:320]}."
+    )
+    ultima_carpeta = _obtener_ultima_carpeta_contexto()
+    if ultima_carpeta is not None:
+        partes.append(
+            f"Si se menciona la carpeta creada o el contexto previo, usa esta ruta: {ultima_carpeta}"
+        )
+    return " ".join(p for p in partes if p)
+
+
+def registrar_objetivo(solicitud, plan):
+    try:
+        plan_json = json.dumps(plan or {}, ensure_ascii=False, indent=2)
+    except TypeError:
+        plan_json = "{}"
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO objetivos (fecha, solicitud, plan_json, estado, resultado)
+            VALUES (?, ?, ?, 'pendiente', '')
+            """,
+            (
+                datetime.datetime.now().isoformat(),
+                str(solicitud or "")[:400],
+                plan_json,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def registrar_paso_objetivo(objetivo_id, paso_numero, titulo, instruccion, acciones, resultado, exito):
+    try:
+        acciones_json = json.dumps(acciones or [], ensure_ascii=False)
+    except TypeError:
+        acciones_json = "[]"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO objetivo_pasos
+            (objetivo_id, paso_numero, titulo, instruccion, acciones_json, resultado, exito)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                objetivo_id,
+                int(paso_numero),
+                str(titulo or "")[:180],
+                str(instruccion or "")[:500],
+                acciones_json,
+                str(resultado or "")[:2500],
+                1 if exito else 0,
+            ),
+        )
+        conn.commit()
+
+
+def actualizar_objetivo_resultado(objetivo_id, estado, resultado):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE objetivos SET estado=?, resultado=? WHERE id=?",
+            (str(estado or "pendiente")[:40], str(resultado or "")[:4000], objetivo_id),
+        )
+        conn.commit()
+
+
+def solicitud_requiere_objetivo(texto):
+    t = normalizar_texto_cache(texto)
+    if not es_intencion_operativa(texto):
+        return False
+    marcadores = (
+        " y luego ",
+        " despues ",
+        " después ",
+        " paso a paso ",
+        " deja listo ",
+        " primero ",
+        " luego ",
+        " al final ",
+        " de forma automatica ",
+        " de forma automática ",
+    )
+    if any(m in f" {t} " for m in marcadores):
+        return True
+    return len(t.split()) >= 12 and any(k in t for k in ("crear", "compilar", "instalar", "mover", "copiar", "organizar"))
+
+
+def generar_plan_objetivo(solicitud):
+    memoria = obtener_contexto_db(limite=12)
+    historial = construir_resumen_contexto(memoria, max_chars=1000)
+    mejoras_txt = construir_bloque_prompt_mejoras()
+    prompt = f"""
+Convierte la solicitud del usuario en un objetivo ejecutable por pasos.
+Responde SOLO JSON válido con este formato:
+{{
+  "respuesta": "resumen ejecutivo",
+  "pasos": [
+    {{"titulo": "paso", "instruccion": "acción concreta"}}
+  ]
+}}
+
+Reglas:
+- Usa entre 1 y 5 pasos.
+- Cada paso debe ser concreto y ejecutable.
+- Si la tarea es simple, usa un solo paso.
+- Si la solicitud menciona rutas/carpeta recién creada/contexto previo, aprovéchalo.
+- Nunca devuelvas texto fuera del JSON.
+
+{mejoras_txt}
+
+Historial:
+{historial}
+
+Solicitud:
+{solicitud}
+"""
+    try:
+        data = consultar_modelo_con_reintentos(
+            "Planificas objetivos ejecutables por pasos cortos. Responde solo JSON válido.",
+            prompt,
+            expect_json=True,
+        )
+        pasos = data.get("pasos", [])
+        if not isinstance(pasos, list) or not pasos:
+            raise RuntimeError("sin pasos")
+        pasos_limpios = []
+        for paso in pasos[:5]:
+            if not isinstance(paso, dict):
+                continue
+            titulo = str(paso.get("titulo") or "Paso").strip()[:120]
+            instruccion = str(paso.get("instruccion") or "").strip()[:500]
+            if instruccion:
+                pasos_limpios.append({"titulo": titulo or "Paso", "instruccion": instruccion})
+        if pasos_limpios:
+            return {
+                "respuesta": str(data.get("respuesta") or "Voy a resolverlo por pasos.").strip(),
+                "pasos": pasos_limpios,
+            }
+    except Exception:
+        pass
+    return {
+        "respuesta": "Voy a intentar resolverlo en una secuencia corta de pasos.",
+        "pasos": [{"titulo": "Resolver solicitud", "instruccion": solicitud}],
+    }
+
+
+def obtener_acciones_para_instruccion(instruccion):
+    acciones_locales = acciones_locales_desde_texto(instruccion) if es_intencion_operativa(instruccion) else []
+    if acciones_locales:
+        acciones_locales = filtrar_acciones_por_intencion(acciones_locales, instruccion)
+    if acciones_locales:
+        return acciones_locales, "local"
+
+    r_plan, a_plan = generar_acciones_con_modelo(instruccion)
+    if a_plan:
+        a_plan = filtrar_acciones_por_intencion(a_plan, instruccion)
+        if a_plan:
+            return a_plan, "planner"
+
+    return [], "sin_acciones"
+
+
+def ejecutar_objetivo_inteligente(solicitud):
+    plan = generar_plan_objetivo(solicitud)
+    objetivo_id = registrar_objetivo(solicitud, plan)
+    resultados_pasos = []
+    todo_ok = True
+
+    for idx, paso in enumerate(plan.get("pasos", []), 1):
+        titulo = str(paso.get("titulo") or f"Paso {idx}")
+        instruccion = str(paso.get("instruccion") or "").strip()
+        if not instruccion:
+            continue
+        bitacora_intentos = []
+        paso_ok = False
+        for intento in range(1, 4):
+            instruccion_intento = construir_instruccion_reintento_objetivo(
+                solicitud,
+                instruccion,
+                intento,
+            )
+            acciones, fuente = obtener_acciones_para_instruccion(instruccion_intento)
+            titulo_intento = titulo if intento == 1 else f"{titulo} (intento {intento})"
+            if not acciones:
+                detalle = f"No encontré acciones ejecutables para el paso '{titulo}' en el intento {intento}."
+                registrar_paso_objetivo(
+                    objetivo_id,
+                    idx,
+                    titulo_intento,
+                    instruccion_intento,
+                    [],
+                    detalle,
+                    False,
+                )
+                bitacora_intentos.append(f"Intento {intento}: {detalle}")
+                continue
+
+            resultados = ejecutar_acciones(acciones)
+            exito = not any(_resultado_es_fallido(r) for r in resultados)
+            registrar_paso_objetivo(
+                objetivo_id,
+                idx,
+                titulo_intento,
+                instruccion_intento,
+                acciones,
+                "\n".join(resultados),
+                exito,
+            )
+            etiqueta = "ok" if exito else "falló"
+            bitacora_intentos.append(
+                f"Intento {intento} [{fuente}/{etiqueta}]\n" + "\n".join(resultados)
+            )
+            if exito:
+                paso_ok = True
+                break
+
+        resultados_pasos.append(f"{idx}. {titulo}\n" + "\n\n".join(bitacora_intentos))
+        if not paso_ok:
+            todo_ok = False
+            break
+
+    resumen = plan.get("respuesta") or "Plan ejecutado."
+    respuesta = resumen
+    if resultados_pasos:
+        respuesta += "\n\n" + "\n\n".join(resultados_pasos)
+
+    estado = "completado" if todo_ok else "parcial"
+    actualizar_objetivo_resultado(objetivo_id, estado, respuesta)
+    return todo_ok, respuesta, objetivo_id
 
 
 def buscar_automatizacion_por_trigger(texto):
@@ -1347,7 +1669,26 @@ def detectar_intencion_principal(texto):
     tipo_tiempo = detectar_consulta_fecha_hora(texto)
     if tipo_tiempo:
         return "tiempo"
-    if any(k in t for k in ("escritorio", "desktop", "carpeta", "directorio", "archivo", "archivos", "elementos")):
+    if any(
+        k in t
+        for k in (
+            "escritorio",
+            "desktop",
+            "carpeta",
+            "directorio",
+            "archivo",
+            "archivos",
+            "elementos",
+            "txt",
+            "md",
+            "csv",
+            "json",
+            "log",
+            "docx",
+            "xlsx",
+            "pptx",
+        )
+    ):
         return "archivos"
     if any(k in t for k in ("api", "token", "tokens", "limite", "límite", "cuota")):
         return "api"
@@ -1368,6 +1709,7 @@ def acciones_permitidas_por_intencion(intencion):
             "crear_archivo_especifico",
             "editar_archivo",
             "crear_carpeta",
+            "crear_archivos_aleatorios",
             "eliminar_ruta",
             "mover_ruta",
             "copiar_ruta",
@@ -1422,6 +1764,7 @@ def listar_directorio(path=None):
             return f"Ruta no encontrada: {destino}"
         if not destino.is_dir():
             return f"La ruta no es carpeta: {destino}"
+        _guardar_known_path("last_folder", str(destino))
         items = sorted(os.listdir(destino))
         if not items:
             return f"La carpeta está vacía: {destino}"
@@ -1645,6 +1988,7 @@ def crear_archivos_aleatorios(path, cantidad=10, prefijo="archivo", extension=".
     base = normalizar_ruta(path)
     try:
         base.mkdir(parents=True, exist_ok=True)
+        _guardar_known_path("last_folder", str(base))
         cant = int(cantidad)
         cant = max(1, min(cant, 1000))
         ext = str(extension or ".txt").strip()
@@ -1674,6 +2018,8 @@ def abrir_ruta(path):
     if not destino.exists():
         return f"Ruta no encontrada: {destino}"
     try:
+        if destino.is_dir():
+            _guardar_known_path("last_folder", str(destino))
         os.startfile(str(destino))
         return f"Abierto: {destino}"
     except OSError as ex:
@@ -2170,7 +2516,31 @@ def normalizar_propuesta_mejora_modelo(tipo, data, solicitud, motivo):
         propuesta = {}
         data["propuesta"] = propuesta
 
-    if tipo in {"habilidad", "automatizacion"}:
+    if tipo == "habilidad":
+        habilidades_payload = propuesta.get("habilidades", [])
+        if isinstance(habilidades_payload, list) and habilidades_payload:
+            habilidades_validas = []
+            for item in habilidades_payload[:12]:
+                if not isinstance(item, dict):
+                    continue
+                trigger_item = str(item.get("trigger_texto") or "").strip()
+                acciones_item = item.get("acciones", [])
+                if trigger_item and isinstance(acciones_item, list) and acciones_item:
+                    habilidades_validas.append(
+                        {"trigger_texto": trigger_item[:200], "acciones": acciones_item}
+                    )
+            if not habilidades_validas:
+                return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+            propuesta["habilidades"] = habilidades_validas
+        else:
+            acciones = propuesta.get("acciones", [])
+            if not isinstance(acciones, list) or not acciones:
+                return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+            for accion in acciones:
+                if not isinstance(accion, dict) or "accion" not in accion:
+                    return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+
+    if tipo == "automatizacion":
         acciones = propuesta.get("acciones", [])
         if not isinstance(acciones, list) or not acciones:
             return construir_propuesta_mejora_local(solicitud, motivo=motivo)
@@ -2184,6 +2554,7 @@ def normalizar_propuesta_mejora_modelo(tipo, data, solicitud, motivo):
             return construir_propuesta_mejora_local(solicitud, motivo=motivo)
         permitidas = {
             "usar_habilidades_auto",
+            "usar_objetivos_inteligentes",
             "proveedor_ia",
             "modelo_online",
             "model",
@@ -2197,6 +2568,20 @@ def normalizar_propuesta_mejora_modelo(tipo, data, solicitud, motivo):
         if not updates_filtradas:
             return construir_propuesta_mejora_local(solicitud, motivo=motivo)
         propuesta["config_updates"] = updates_filtradas
+
+    if tipo == "prompt":
+        reglas = propuesta.get("prompt_rules", [])
+        if isinstance(reglas, str):
+            reglas = [reglas]
+        if not isinstance(reglas, list):
+            reglas = []
+        reglas_limpias = [str(r or "").strip()[:400] for r in reglas if str(r or "").strip()]
+        if not reglas_limpias:
+            fallback = str(data.get("detalle") or solicitud or "").strip()[:400]
+            if not fallback:
+                return construir_propuesta_mejora_local(solicitud, motivo=motivo)
+            reglas_limpias = [fallback]
+        propuesta["prompt_rules"] = reglas_limpias[:24]
 
     return tipo, str(data.get("titulo") or "Mejora segura pendiente").strip(), str(data.get("detalle") or "").strip(), data
 
@@ -2248,6 +2633,7 @@ def validar_ollama_disponible():
 def decidir(prompt):
     memoria = obtener_contexto_db(limite=20)
     historial = construir_resumen_contexto(memoria, max_chars=1800)
+    mejoras_txt = construir_bloque_prompt_mejoras()
 
     contexto = f"""
 Eres un agente conectado a herramientas reales.
@@ -2296,6 +2682,8 @@ Formato de salida:
 
 Historial reciente:
 {historial}
+
+{mejoras_txt}
 
 Usuario:
 {prompt}
@@ -2435,6 +2823,7 @@ def guardar_preferencias():
     CONFIG["modelo_online"] = online_model_var.get()
     CONFIG["voz_activa"] = bool(voz_var.get())
     CONFIG["usar_habilidades_auto"] = bool(skills_auto_var.get())
+    CONFIG["usar_objetivos_inteligentes"] = bool(objectives_var.get())
     CONFIG["window_size"] = chat_window.geometry().split("+")[0]
     CONFIG["window_x"] = chat_window.winfo_x()
     CONFIG["window_y"] = chat_window.winfo_y()
@@ -3378,6 +3767,8 @@ def sincronizar_ui_desde_config():
         voz_speed_var.set(CONFIG.get("voz_speed_label", "Normal"))
     if skills_auto_var is not None:
         skills_auto_var.set(bool(CONFIG.get("usar_habilidades_auto", False)))
+    if objectives_var is not None:
+        objectives_var.set(bool(CONFIG.get("usar_objetivos_inteligentes", True)))
     if mic_var is not None:
         mic_var.set(CONFIG.get("voz_entrada_microfono", mic_var.get()))
     actualizar_resumen_visual()
@@ -3416,6 +3807,13 @@ def on_toggle_skills_auto():
     CONFIG["usar_habilidades_auto"] = bool(skills_auto_var.get())
     guardar_config(CONFIG)
     estado_var.set("Aprendizaje automático actualizado")
+    chat_window.after(1200, lambda: estado_var.set("Listo"))
+
+
+def on_toggle_objectives_auto():
+    CONFIG["usar_objetivos_inteligentes"] = bool(objectives_var.get())
+    guardar_config(CONFIG)
+    estado_var.set("Objetivos inteligentes actualizados")
     chat_window.after(1200, lambda: estado_var.set("Listo"))
 
 
@@ -3504,7 +3902,7 @@ def resolver_ruta_alias(texto):
         return home / "Videos"
     if "temp" in t or "temporal" in t:
         return Path(os.environ.get("TEMP", str(home / "AppData" / "Local" / "Temp")))
-    if "esa carpeta" in t or "esa ruta" in t or "ahi" in t or "ahí" in t:
+    if texto_refiere_ultima_carpeta(t):
         known = CONFIG.get("known_paths", {}) if isinstance(CONFIG.get("known_paths"), dict) else {}
         last_folder = str(known.get("last_folder", "")).strip()
         if last_folder:
@@ -3523,6 +3921,24 @@ def _obtener_ultima_carpeta_contexto():
     if p.exists() and p.is_dir():
         return p
     return None
+
+
+def texto_refiere_ultima_carpeta(texto):
+    t = normalizar_texto_cache(texto)
+    referencias = (
+        "esa carpeta",
+        "esa ruta",
+        "ahi",
+        "ahí",
+        "carpeta creada",
+        "carpeta que creaste",
+        "ultima carpeta",
+        "última carpeta",
+        "carpeta recien creada",
+        "carpeta recién creada",
+        "carpeta anterior",
+    )
+    return any(ref in t for ref in referencias)
 
 
 def _normalizar_nombre_carpeta_referencia(valor):
@@ -3555,7 +3971,7 @@ def acciones_locales_desde_texto(texto):
         k in t for k in ("archivos", "elementos", "carpeta", "directorio")
     ):
         destino_lista = ruta_alias or Path.home()
-        if any(k in t for k in ("esa carpeta", "esa ruta", "ahí", "ahi")):
+        if texto_refiere_ultima_carpeta(t):
             destino_ctx = resolver_ruta_alias(t)
             if destino_ctx is not None:
                 destino_lista = destino_ctx
@@ -3602,7 +4018,8 @@ def acciones_locales_desde_texto(texto):
     if (
         "carpeta" in t
         and any(k in t for k in ("crear", "crea", "nueva", "haz", "genera"))
-        and not any(k in t for k in ("archivo", "archivos", "documento", "documentos"))
+        and not any(k in t for k in ("archivo", "archivos", "documento", "documentos", "elemento", "elementos"))
+        and not any(k in t for k in ("aleatorio", "aleatorios"))
     ):
         m = re.search(r"['\"]([^'\"]+)['\"]", texto)
         if m:
@@ -3674,7 +4091,16 @@ def acciones_locales_desde_texto(texto):
                 }
             ]
 
-    if ("crear" in t or "crea" in t or "genera" in t) and ("archivo" in t or "archivos" in t or "elemento" in t or "elementos" in t):
+    if (
+        ("crear" in t or "crea" in t or "genera" in t)
+        and (
+            "archivo" in t
+            or "archivos" in t
+            or "elemento" in t
+            or "elementos" in t
+            or re.search(r"(?i)\b(txt|md|csv|json|log)\b", t)
+        )
+    ):
         m_cant = re.search(r"\b(\d{1,4})\b", t)
         if m_cant is None and ("aleatorio" not in t and "aleatorios" not in t):
             # Si no pide cantidad ni aleatoriedad, no forzamos lote.
@@ -3688,7 +4114,7 @@ def acciones_locales_desde_texto(texto):
         if m_carpeta:
             ruta_txt = m_carpeta.group(1).strip()
             # "en esa carpeta" debe apuntar al último folder creado/abierto.
-            if any(k in ruta_txt.lower() for k in ("esa carpeta", "esa ruta", "ahí", "ahi")):
+            if texto_refiere_ultima_carpeta(ruta_txt):
                 destino = resolver_ruta_alias(ruta_txt)
             elif "carpeta " in ruta_txt.lower():
                 m_nom = re.search(r"(?i)carpeta\s+([a-zA-Z0-9_\-\s]{1,80})", ruta_txt)
@@ -3709,10 +4135,14 @@ def acciones_locales_desde_texto(texto):
                 destino = ctx
         if destino is None:
             destino = ruta_alias or descubrir_ruta_escritorio()
+        extension = ".txt"
+        m_ext = re.search(r"(?i)\b(txt|md|csv|json|log)\b", t)
+        if m_ext:
+            extension = "." + m_ext.group(1).lower()
         return [
             {
                 "accion": "crear_archivos_aleatorios",
-                "args": {"path": str(destino), "cantidad": cantidad, "prefijo": "item", "extension": ".txt"},
+                "args": {"path": str(destino), "cantidad": cantidad, "prefijo": "item", "extension": extension},
             }
         ]
 
@@ -3824,6 +4254,7 @@ def es_intencion_operativa(texto):
 def generar_acciones_con_modelo(texto):
     memoria = obtener_contexto_db(limite=20)
     historial = construir_resumen_contexto(memoria, max_chars=1400)
+    mejoras_txt = construir_bloque_prompt_mejoras()
     prompt_plan = f"""
 Convierte la solicitud del usuario a acciones ejecutables.
 Nunca respondas que no puedes. Siempre intenta una estrategia.
@@ -3862,6 +4293,8 @@ Acciones permitidas:
 
 Historial:
 {historial}
+
+{mejoras_txt}
 
 Solicitud:
 {texto}
@@ -3911,6 +4344,7 @@ def procesar_prompt_sync(texto):
     texto_l = solicitud_original.lower()
     tipo_tiempo = detectar_consulta_fecha_hora(solicitud_original)
     intencion = detectar_intencion_principal(solicitud_original)
+    objetivo_intentado = False
 
     if not any(k in texto_l for k in ("aprende", "aprendelo", "apréndelo")):
         ULTIMA_SOLICITUD_USUARIO = solicitud_original
@@ -3997,6 +4431,26 @@ def procesar_prompt_sync(texto):
             guardar_mensaje_db("assistant", respuesta_final)
             registrar_ejecucion(solicitud_original, respuesta_final)
             return respuesta_final
+
+    if CONFIG.get("usar_objetivos_inteligentes", True) and solicitud_requiere_objetivo(solicitud_original):
+        objetivo_intentado = True
+        exito_objetivo, respuesta_objetivo, objetivo_id = ejecutar_objetivo_inteligente(solicitud_original)
+        if exito_objetivo:
+            guardar_mensaje_db("assistant", respuesta_objetivo)
+            registrar_ejecucion(solicitud_original, respuesta_objetivo)
+            return respuesta_objetivo
+        mejora_id, tipo, titulo_mejora, detalle_mejora, _ = crear_mejora_segura_desde_solicitud(
+            solicitud_original,
+            motivo=f"objetivo #{objetivo_id} quedó parcial",
+            origen="objetivo",
+        )
+        respuesta_objetivo += (
+            f"\n\nRegistré una mejora segura #{mejora_id} ({tipo}: {titulo_mejora}) para reforzar esta capacidad.\n"
+            f"Detalle: {detalle_mejora}"
+        )
+        guardar_mensaje_db("assistant", respuesta_objetivo)
+        registrar_ejecucion(solicitud_original, respuesta_objetivo)
+        return respuesta_objetivo
 
     acciones_locales = acciones_locales_desde_texto(solicitud_original) if es_intencion_operativa(solicitud_original) else []
     if acciones_locales:
@@ -4087,6 +4541,15 @@ def procesar_prompt_sync(texto):
             if not respuesta:
                 respuesta = f"Error en planificación: {ex}"
 
+    if requiere_plan and CONFIG.get("usar_objetivos_inteligentes", True) and not objetivo_intentado and (not acciones):
+        objetivo_intentado = True
+        exito_objetivo, respuesta_objetivo, objetivo_id = ejecutar_objetivo_inteligente(solicitud_original)
+        if exito_objetivo:
+            guardar_mensaje_db("assistant", respuesta_objetivo)
+            registrar_ejecucion(solicitud_original, respuesta_objetivo)
+            return respuesta_objetivo
+        respuesta = respuesta_objetivo or respuesta
+
     if not tipo_tiempo and acciones:
         acciones = [a for a in acciones if a.get("accion") != "obtener_hora"]
 
@@ -4137,218 +4600,17 @@ class AgentCore:
 
 
 def _procesar_mensaje(texto):
-    global ULTIMA_SOLICITUD_USUARIO
     chat_window.after(0, lambda: estado_var.set("Pensando..."))
     chat_window.after(0, expandir_si_compacto)
-    texto_l = texto.lower()
-    solicitud_original = texto.strip()
-    tipo_tiempo = detectar_consulta_fecha_hora(solicitud_original)
-    intencion = detectar_intencion_principal(solicitud_original)
-
-    if not any(k in texto_l for k in ("aprende", "aprendelo", "apréndelo")):
-        ULTIMA_SOLICITUD_USUARIO = solicitud_original
-
-    if tipo_tiempo:
-        cache_key = f"fecha_hora::{tipo_tiempo}::{normalizar_texto_cache(solicitud_original)}"
-        ttl_seg = 10 if tipo_tiempo in ("hora", "fecha_hora") else 24 * 3600
-        respuesta_cache = obtener_cache_respuesta(cache_key, max_age_seconds=ttl_seg)
-        respuesta_final = respuesta_cache or formatear_fecha_hora_bonita(tipo_tiempo)
-        if not respuesta_cache:
-            guardar_cache_respuesta(cache_key, respuesta_final)
-        def _post_tiempo():
-            mensaje(respuesta_final, "ia")
-            guardar_mensaje_db("assistant", respuesta_final)
-            registrar_ejecucion(solicitud_original, respuesta_final)
-            estado_var.set("Listo")
-            if CONFIG.get("voz_activa", True):
-                hablar_garantizado(respuesta_final)
-        chat_window.after(0, _post_tiempo)
-        return
-
-    # Respuestas conversacionales locales para evitar bucles del planner.
-    if intencion == "general":
-        resp_local = respuesta_conversacional_local(solicitud_original)
-        if resp_local:
-            def _post_conv():
-                mensaje(resp_local, "ia")
-                guardar_mensaje_db("assistant", resp_local)
-                registrar_ejecucion(solicitud_original, resp_local)
-                estado_var.set("Listo")
-                if CONFIG.get("voz_activa", True):
-                    hablar_garantizado(resp_local)
-            chat_window.after(0, _post_conv)
-            return
-
-    if any(k in texto_l for k in ("aprende a hacerlo", "aprende hacerlo", "aprendelo", "apréndelo")):
-        if not ULTIMA_SOLICITUD_USUARIO:
-            respuesta_final = "No tengo una solicitud previa para aprender. Dame primero una tarea concreta."
-        else:
-            acciones_aprendidas = acciones_locales_desde_texto(ULTIMA_SOLICITUD_USUARIO)
-            if not acciones_aprendidas:
-                respuesta_final = (
-                    "Intenté aprender, pero no encontré un patrón automático para esa tarea todavía. "
-                    "Dímela con más detalle (ruta, archivo o patrón)."
-                )
-            else:
-                guardar_habilidad(ULTIMA_SOLICITUD_USUARIO, acciones_aprendidas)
-                resultados_aprendidos = ejecutar_acciones(acciones_aprendidas)
-                respuesta_final = (
-                    "Aprendido y ejecutado en tiempo real.\n\n" + "\n".join(resultados_aprendidos)
-                )
-
-    # Ejecuta atajos locales solo en intenciones operativas explícitas.
-    acciones_locales = acciones_locales_desde_texto(texto) if es_intencion_operativa(solicitud_original) else []
-    if acciones_locales:
-        acciones_locales = filtrar_acciones_por_intencion(acciones_locales, solicitud_original)
-    if acciones_locales:
-        resultados_locales = ejecutar_acciones(acciones_locales)
-        exito_local = not any(
-            "error" in (r or "").lower() or "no pudo" in (r or "").lower() or "no se pudo" in (r or "").lower()
-            for r in resultados_locales
-        )
-        registrar_leccion(solicitud_original, acciones_locales, "\n".join(resultados_locales), exito_local)
-        if exito_local:
-            guardar_habilidad(solicitud_original, acciones_locales)
-        respuesta_final = "\n".join(resultados_locales)
-
-        def _post_local():
-            mensaje(respuesta_final, "ia")
-            guardar_mensaje_db("assistant", respuesta_final)
-            registrar_ejecucion(solicitud_original, respuesta_final)
-            estado_var.set("Listo")
-            if CONFIG.get("voz_activa", True):
-                hablar_garantizado(respuesta_final)
-
-        chat_window.after(0, _post_local)
-        return
-
-    if es_intencion_operativa(solicitud_original):
-        propuesta_auto = []
-        t_auto = solicitud_original.lower()
-        base_auto = resolver_ruta_alias(solicitud_original) or descubrir_ruta_escritorio()
-        if ("crear" in t_auto or "genera" in t_auto) and ("docx" in t_auto or "word" in t_auto):
-            propuesta_auto = [{"accion": "crear_archivo_especifico", "args": {"path": str(base_auto / "documento_generado.docx"), "tipo": "docx", "contenido": "Documento generado automáticamente"}}]
-        elif ("crear" in t_auto or "genera" in t_auto) and ("xlsx" in t_auto or "excel" in t_auto):
-            propuesta_auto = [{"accion": "crear_archivo_especifico", "args": {"path": str(base_auto / "tabla_generada.xlsx"), "tipo": "xlsx", "contenido": "columna1,columna2\nvalor1,valor2"}}]
-        elif ("crear" in t_auto or "genera" in t_auto) and ("pptx" in t_auto or "powerpoint" in t_auto):
-            propuesta_auto = [{"accion": "crear_archivo_especifico", "args": {"path": str(base_auto / "presentacion_generada.pptx"), "tipo": "pptx", "contenido": "Presentación generada automáticamente"}}]
-
-        if propuesta_auto:
-            resultados_auto = ejecutar_acciones(propuesta_auto)
-            exito_auto = not any("error" in (r or "").lower() or "no pude" in (r or "").lower() for r in resultados_auto)
-            registrar_leccion(solicitud_original, propuesta_auto, "\n".join(resultados_auto), exito_auto)
-            if exito_auto:
-                guardar_habilidad(solicitud_original, propuesta_auto)
-            respuesta_auto = "\n".join(resultados_auto)
-
-            def _post_auto():
-                mensaje(respuesta_auto, "ia")
-                guardar_mensaje_db("assistant", respuesta_auto)
-                registrar_ejecucion(solicitud_original, respuesta_auto)
-                estado_var.set("Listo")
-                if CONFIG.get("voz_activa", True):
-                    hablar_garantizado(respuesta_auto)
-            chat_window.after(0, _post_auto)
-            return
-
     try:
-        respuesta_cruda = decidir(texto)
+        respuesta_final = procesar_prompt_sync(texto)
     except Exception as ex:
-        respuesta_cruda = json.dumps(
-            {
-                "respuesta": f"Error consultando proveedor IA: {ex}",
-                "acciones": [],
-            },
-            ensure_ascii=False,
-        )
-
-    try:
-        data = json.loads(respuesta_cruda)
-    except json.JSONDecodeError as ex:
-        texto_plano = (respuesta_cruda or "").strip()
-        if texto_plano:
-            respuesta = texto_plano
-        else:
-            respuesta = "No devolviste JSON útil."
-        data = {"respuesta": respuesta, "acciones": []}
-
-    respuesta = data.get("respuesta", "").strip()
-    acciones = data.get("acciones", [])
-    acciones = filtrar_acciones_por_intencion(acciones, solicitud_original)
-    if not acciones and any(
-        s in respuesta.lower()
-        for s in (
-            "no puedo acceder",
-            "no tengo la capacidad",
-            "no puedo acceder directamente",
-        )
-    ):
-        ruta_alias = resolver_ruta_alias(texto_l)
-        if ruta_alias:
-            acciones = [{"accion": "listar_directorio", "args": {"path": str(ruta_alias)}}]
-            if not respuesta:
-                respuesta = "Lo consulto localmente ahora mismo."
-
-    # Solo activar planner cuando la solicitud parezca operativa.
-    # Evita arrastrar acciones del turno previo en preguntas conversacionales.
-    requiere_plan = es_intencion_operativa(solicitud_original)
-    if requiere_plan and ((not acciones) or any(p in respuesta.lower() for p in NEGATIVE_PATTERNS)):
-        try:
-            r_plan, a_plan = generar_acciones_con_modelo(texto)
-            if a_plan:
-                acciones = a_plan
-                if r_plan:
-                    respuesta = r_plan
-            else:
-                # Si no hay plan válido, responde sin ejecutar comandos arbitrarios.
-                acciones = []
-                if not respuesta:
-                    respuesta = (
-                        "No encontré un plan ejecutable para esa petición aún. "
-                        "Si quieres, te muestro opciones o me das una instrucción más concreta."
-                    )
-        except Exception as ex:
-            acciones = []
-            if not respuesta:
-                respuesta = f"Error en planificación: {ex}"
-
-    if not tipo_tiempo and acciones:
-        acciones = [a for a in acciones if a.get("accion") != "obtener_hora"]
-
-    if intencion in ("archivos", "api", "voz", "general") and acciones:
-        acciones = [a for a in acciones if a.get("accion") not in ("obtener_ip_local", "obtener_ip_publica")]
-
-    resultados = ejecutar_acciones(acciones)
-
-    def _resultado_es_fallido(linea):
-        s = (linea or "").lower()
-        patrones = (
-            "error",
-            "no pude",
-            "no tengo",
-            "ruta no encontrada",
-            "url inválida",
-            "api.example.com",
-            "failed",
-            "max retries exceeded",
-        )
-        return any(p in s for p in patrones)
-
-    hubo_error = any(_resultado_es_fallido(r) for r in resultados)
-
-    # Aprende automáticamente lo que funcionó.
-    if acciones and not hubo_error:
-        guardar_habilidad(solicitud_original, acciones)
-    registrar_leccion(solicitud_original, acciones, "\n".join(resultados), not hubo_error)
-
-    respuesta_final = respuesta or "Sin respuesta de texto."
-    if resultados:
-        respuesta_final += "\n\n" + "\n".join(resultados)
+        respuesta_final = f"Error interno procesando mensaje: {ex}"
+        guardar_mensaje_db("assistant", respuesta_final)
+        registrar_ejecucion(texto, respuesta_final)
 
     def _post():
         mensaje(respuesta_final, "ia")
-        guardar_mensaje_db("assistant", respuesta_final)
-        registrar_ejecucion(solicitud_original, respuesta_final)
         estado_var.set("Listo")
         if CONFIG.get("voz_activa", True):
             hablar_garantizado(respuesta_final)
@@ -4364,7 +4626,6 @@ def enviar(event=None):
         return "break" if event is not None else None
 
     mensaje(texto, "user")
-    guardar_mensaje_db("user", texto)
     estado_var.set("Pensando...")
     def _worker():
         try:
@@ -4486,6 +4747,8 @@ def configurar_interfaz():
     global chk_voz
     global skills_auto_var
     global chk_skills_auto
+    global objectives_var
+    global chk_objectives
     global btn_compacto
     global btn_settings
     global btn_guardar
@@ -4848,6 +5111,20 @@ def configurar_interfaz():
         font=("Segoe UI", 9),
     )
     chk_skills_auto.pack(side="left")
+    objectives_var = tk.BooleanVar(value=bool(CONFIG.get("usar_objetivos_inteligentes", True)))
+    chk_objectives = tk.Checkbutton(
+        row_learning,
+        text="Resolver por objetivos",
+        variable=objectives_var,
+        command=on_toggle_objectives_auto,
+        bg="#111827",
+        fg="#cbd5e1",
+        selectcolor="#1f2937",
+        activebackground="#111827",
+        activeforeground="#cbd5e1",
+        font=("Segoe UI", 9),
+    )
+    chk_objectives.pack(side="left", padx=(14, 0))
 
     tk.Label(
         settings_panel,

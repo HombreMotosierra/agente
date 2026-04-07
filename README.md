@@ -1,27 +1,67 @@
 # Agente IA Hibrido
 
-Proyecto de agente local con modo hibrido para trabajar con IA local o proveedor API bajo control del usuario.
+Agente de escritorio para Windows con dos modos de inferencia:
 
-## Estado actual
+- `local` con Ollama
+- `api` con Groq
 
-- Interfaz de escritorio en Tkinter.
-- Seleccion manual del proveedor: `local` o `api`.
-- Interfaz más limpia con panel de ajustes plegable y compositor de mensajes mejorado.
-- Ejecucion de herramientas locales para archivos, comandos, voz e integraciones.
-- Soporte para Ollama en local y Groq por API.
-- Orquestador HTTP operativo con endpoints `/health`, `/ask` y `/accion`.
-- Reintentos del modelo y respuestas de respaldo para no quedarse sin contestar fácilmente.
-- Panel de `Mejoras` para propuestas seguras que no tocan código automáticamente sin autorización.
-- Memoria y habilidades guardadas en SQLite local.
+La aplicacion incluye interfaz Tkinter, memoria local en SQLite, herramientas de archivos y un orquestador HTTP opcional.
+
+## Requisitos
+
+- Windows 10 u 11
+- Python 3.11 o superior
+- Acceso a internet para instalar dependencias
+- Ollama si quieres usar el modo local
+- Una API key propia de Groq si quieres usar el modo API
+
+## Instalacion para cualquier persona del equipo
+
+1. Clona o copia esta carpeta completa.
+2. Ejecuta `instalar_windows.bat`.
+3. Si vas a usar modo local, verifica que Ollama este instalado.
+4. Abre `iniciar_agente.vbs`.
+5. Si vas a usar modo API, pega tu propia Groq API key desde el boton `Groq Key` o editando `agente_ia_data/config.json`.
+
+## Inicio rapido
+
+- `iniciar_agente.vbs`: abre la interfaz sin mostrar consola.
+- `iniciar_agente.bat`: abre la interfaz desde lote.
+- `iniciar_orquestador.bat`: levanta el servidor HTTP local.
+- `iniciar_orquestador.vbs`: levanta el orquestador ocultando la consola.
+
+## Modo local
+
+El modelo por defecto es `qwen2.5:7b`.
+
+Si Ollama esta instalado, `instalar_windows.bat` intentara descargar ese modelo automaticamente. Si prefieres hacerlo a mano:
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+## Modo API
+
+La clave no viene incluida. Cada persona debe configurar la suya.
+
+- Proveedor soportado en la app: Groq
+- Modelo API por defecto: `llama-3.1-8b-instant`
+
+## Configuracion
+
+- Archivo de ejemplo: `config.example.json`
+- Configuracion local real: `agente_ia_data/config.json`
+
+La carpeta `agente_ia_data/` esta ignorada por Git porque guarda historial, ajustes locales y datos personales.
 
 ## Estructura
 
-- `Codigo/`: codigo fuente principal.
-- `agente_ia_data/`: datos locales de ejecucion, historial y configuracion.
-- `iniciar_agente.vbs`: lanzador del agente.
+- `Codigo/`: codigo principal de la app y del orquestador.
+- `agente_ia_data/`: base de datos local y configuracion de cada persona.
+- `requirements.txt`: dependencias Python.
+- `instalar_windows.bat`: instalacion automatizada para Windows.
 
-## Objetivo de la siguiente fase
+## Notas de uso
 
-- Seguir separando `core` y `ui` para reducir el tamaño del modulo principal.
-- Preparar una base segura para aprendizaje guiado y futuras mejoras del agente.
-- Modernizar la interfaz para que se vea mas limpia, consistente y minimalista.
+- El proveedor no cambia solo: se selecciona manualmente entre `local` y `api`.
+- El orquestador expone `/health`, `/ask` y `/accion` en `http://127.0.0.1:8765`.

@@ -1,0 +1,20 @@
+{
+  "model": "qwen2.5:7b",
+  "modelo_online": "llama-3.1-8b-instant",
+  "proveedor_ia": "local",
+  "groq_api_key": "",
+  "api_base_url": "",
+  "api_bearer_token": "",
+  "n8n_webhook_url": "",
+  "orquestador_url": "http://127.0.0.1:8765",
+  "orquestador_token": "",
+  "usar_habilidades_auto": true,
+  "usar_objetivos_inteligentes": true,
+  "prompt_mejoras": [],
+  "known_paths": {},
+  "window_size": "1280x900",
+  "compact_window_size": "340x520",
+  "window_x": 100,
+  "window_y": 60,
+  "ollama_url": "http://127.0.0.1:11434"
+}

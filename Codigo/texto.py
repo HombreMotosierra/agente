@@ -3,7 +3,6 @@ from difflib import SequenceMatcher
 import json
 import random
 import string
-import queue
 import re
 import sqlite3
 import subprocess
@@ -17,19 +16,15 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import ollama
-import pyttsx3
 import requests
-try:
-    import speech_recognition as sr
-except Exception:
-    sr = None
 
 
 # ========================
 # PATHS / CONFIG
 # ========================
 BASE_DIR = Path(__file__).resolve().parent
-APP_DIR = BASE_DIR.parent / "agente_ia_data"
+ROOT_DIR = BASE_DIR.parent
+APP_DIR = ROOT_DIR / "agente_ia_data"
 APP_DIR.mkdir(exist_ok=True)
 MEJORAS_DIR = APP_DIR / "mejoras_seguras"
 MEJORAS_DIR.mkdir(exist_ok=True)
@@ -39,15 +34,6 @@ CONFIG_PATH = APP_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "model": "qwen2.5:7b",
-    "voz_activa": True,
-    "voz_rate": 180,
-    "voz_volume": 1.0,
-    "voz_voice_id": "",
-    "voz_style": "Natural",
-    "voz_speed_label": "Normal",
-    "voz_entrada_activa": True,
-    "voz_entrada_idioma": "es-ES",
-    "voz_entrada_microfono": "",
     "modelo_online": "llama-3.1-8b-instant",
     "proveedor_ia": "local",
     "groq_api_key": "",
@@ -101,28 +87,33 @@ def proveedor_ui_value(valor):
     return "api" if normalizar_proveedor_ia(valor) == "online" else "local"
 
 
-def cargar_config():
-    if not CONFIG_PATH.exists():
-        guardar_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
-
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
+def normalizar_config(data=None):
     cfg = DEFAULT_CONFIG.copy()
-    cfg.update(data)
+    if isinstance(data, dict):
+        cfg.update(data)
     cfg["proveedor_ia"] = normalizar_proveedor_ia(cfg.get("proveedor_ia"))
     return cfg
 
 
+def cargar_config():
+    if not CONFIG_PATH.exists():
+        guardar_config(DEFAULT_CONFIG)
+        return normalizar_config(DEFAULT_CONFIG)
+
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return normalizar_config(data)
+
+
 def guardar_config(config):
+    config = normalizar_config(config)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
 
 CONFIG = cargar_config()
 ULTIMA_SOLICITUD_USUARIO = ""
-escucha_activa = False
 root = None
 chat_window = None
 style = None
@@ -132,21 +123,12 @@ titulo = None
 hero_subtitle_var = None
 provider_badge_var = None
 provider_badge = None
-tts_estado = None
 model_var = None
 combo_model = None
 provider_var = None
 combo_provider = None
 online_model_var = None
 combo_online_model = None
-mic_var = None
-combo_mic = None
-voz_style_var = None
-combo_voz_style = None
-voz_speed_var = None
-combo_voz_speed = None
-voz_var = None
-chk_voz = None
 skills_auto_var = None
 chk_skills_auto = None
 objectives_var = None
@@ -167,8 +149,6 @@ btn_settings = None
 frame_input = None
 entrada = None
 btn_limpiar = None
-btn_micro = None
-btn_refresh_mic = None
 btn_enviar = None
 chat_compacto = False
 auto_compact_job = None
@@ -1033,9 +1013,6 @@ def aplicar_mejora_segura(mejora_id):
             "proveedor_ia",
             "modelo_online",
             "model",
-            "voz_activa",
-            "voz_style",
-            "voz_speed_label",
             "compact_window_size",
             "window_size",
         }
@@ -1355,223 +1332,6 @@ def buscar_automatizacion_por_trigger(texto):
             continue
     return mejor
 
-
-# ========================
-# VOZ ROBUSTA (COLA)
-# ========================
-voz_queue = queue.Queue()
-_voz_lock = threading.Lock()
-tts_status_var = None
-
-
-def set_tts_status(texto):
-    if tts_status_var is not None and chat_window is not None:
-        chat_window.after(0, lambda: tts_status_var.set(texto))
-
-
-def listar_voces_disponibles():
-    try:
-        eng = pyttsx3.init()
-        voces = eng.getProperty("voices") or []
-        resultado = []
-        for v in voces:
-            nombre = getattr(v, "name", "sin_nombre")
-            vid = getattr(v, "id", "")
-            langs = getattr(v, "languages", [])
-            langs_txt = ",".join([str(x) for x in langs]) if langs else ""
-            resultado.append({"id": vid, "name": nombre, "langs": langs_txt})
-        return resultado
-    except Exception:
-        return []
-
-
-def elegir_voz_id(preferencias):
-    prefs = [p.lower() for p in preferencias if p]
-    voces = listar_voces_disponibles()
-    if not voces:
-        return ""
-    for voz in voces:
-        huella = f"{voz['name']} {voz['id']} {voz['langs']}".lower()
-        if all(p in huella for p in prefs):
-            return voz["id"]
-    for voz in voces:
-        huella = f"{voz['name']} {voz['id']} {voz['langs']}".lower()
-        if any(p in huella for p in prefs):
-            return voz["id"]
-    return voces[0]["id"]
-
-
-def aplicar_config_engine(engine):
-    try:
-        engine.setProperty("rate", int(CONFIG.get("voz_rate", 180)))
-    except Exception:
-        pass
-    try:
-        volume = float(CONFIG.get("voz_volume", 1.0))
-        volume = max(0.1, min(1.0, volume))
-        engine.setProperty("volume", volume)
-    except Exception:
-        pass
-    voz_id = (CONFIG.get("voz_voice_id") or "").strip()
-    if voz_id:
-        try:
-            engine.setProperty("voice", voz_id)
-        except Exception:
-            pass
-
-
-def crear_engine():
-    eng = pyttsx3.init()
-    aplicar_config_engine(eng)
-    return eng
-
-
-def worker_voz():
-    engine = crear_engine()
-    while True:
-        item = voz_queue.get()
-        if isinstance(item, tuple):
-            texto, evento = item
-        else:
-            texto, evento = item, None
-        if texto is None:
-            break
-        if not CONFIG.get("voz_activa", True):
-            if evento:
-                evento.set()
-            continue
-        try:
-            aplicar_config_engine(engine)
-            engine.say(texto)
-            engine.runAndWait()
-        except Exception:
-            try:
-                engine.stop()
-            except Exception:
-                pass
-            engine = crear_engine()
-            # Reintento inmediato una vez.
-            try:
-                with _voz_lock:
-                    set_tts_status("🔊 reintentando...")
-                    aplicar_config_engine(engine)
-                    engine.say(texto)
-                    engine.runAndWait()
-            except Exception:
-                pass
-        finally:
-            set_tts_status("🛑 silencio")
-            if evento:
-                evento.set()
-
-
-threading.Thread(target=worker_voz, daemon=True).start()
-
-
-def hablar(texto, esperar=False):
-    if not texto.strip():
-        return
-    voz_queue.put(texto)
-
-
-def hablar_garantizado(texto):
-    try:
-        hablar(texto)
-    except Exception:
-        pass
-
-
-def configurar_voz(estilo=None, velocidad=None, volumen=None, genero=None):
-    cambios = []
-
-    if velocidad is not None:
-        try:
-            vel = int(velocidad)
-            vel = max(120, min(260, vel))
-            CONFIG["voz_rate"] = vel
-            cambios.append(f"velocidad={vel}")
-        except (TypeError, ValueError):
-            return "No pude aplicar velocidad. Usa un número entre 120 y 260."
-
-    if volumen is not None:
-        try:
-            vol = float(volumen)
-            if vol > 1:
-                vol = vol / 100.0
-            vol = max(0.1, min(1.0, vol))
-            CONFIG["voz_volume"] = vol
-            cambios.append(f"volumen={int(vol * 100)}%")
-        except (TypeError, ValueError):
-            return "No pude aplicar volumen. Usa 0.1-1.0 o 10-100."
-
-    preferencias = []
-    if genero:
-        g = str(genero).lower()
-        if g in ("femenina", "mujer", "female"):
-            preferencias.extend(["female", "maria", "helena", "zira", "es"])
-        elif g in ("masculina", "hombre", "male"):
-            preferencias.extend(["male", "david", "pablo", "jorge", "es"])
-    if estilo:
-        e = str(estilo).lower()
-        if "suave" in e or "calida" in e or "cálida" in e:
-            preferencias.extend(["female", "es"])
-            CONFIG["voz_style"] = "Suave"
-        if "profunda" in e or "grave" in e:
-            preferencias.extend(["male", "es"])
-            CONFIG["voz_style"] = "Profunda"
-        if "natural" in e:
-            CONFIG["voz_style"] = "Natural"
-
-    if preferencias:
-        voice_id = elegir_voz_id(preferencias)
-        if voice_id:
-            CONFIG["voz_voice_id"] = voice_id
-            cambios.append("voz=actualizada")
-
-    guardar_config(CONFIG)
-    if not cambios:
-        return "No hubo cambios de voz para aplicar."
-    return "Voz actualizada en tiempo real: " + ", ".join(cambios)
-
-
-def aplicar_ajuste_voz_ui(style_label=None, speed_label=None):
-    args = {}
-    if style_label:
-        style_map = {
-            "Natural": "natural",
-            "Suave": "suave",
-            "Profunda": "grave",
-            "Femenina": "suave",
-            "Masculina": "grave",
-        }
-        estilo = style_map.get(style_label, "natural")
-        args["estilo"] = estilo
-        if style_label == "Femenina":
-            args["genero"] = "femenina"
-        elif style_label == "Masculina":
-            args["genero"] = "masculina"
-        CONFIG["voz_style"] = style_label
-
-    if speed_label:
-        speed_map = {"Lenta": 150, "Normal": 180, "Rápida": 220}
-        vel = speed_map.get(speed_label, 180)
-        args["velocidad"] = vel
-        CONFIG["voz_speed_label"] = speed_label
-
-    if not args:
-        return "Sin cambios de voz."
-    return configurar_voz(**args)
-
-
-def listar_microfonos():
-    if sr is None:
-        return []
-    try:
-        return sr.Microphone.list_microphone_names()
-    except Exception:
-        return []
-
-
 # ========================
 # HERRAMIENTAS
 # ========================
@@ -1694,8 +1454,6 @@ def detectar_intencion_principal(texto):
         return "api"
     if any(k in t for k in ("ip", "red", "wifi", "ethernet")):
         return "red"
-    if any(k in t for k in ("voz", "microfono", "micrófono", "mic", "habla", "tono")):
-        return "voz"
     return "general"
 
 
@@ -1720,7 +1478,6 @@ def acciones_permitidas_por_intencion(intencion):
         },
         "api": {"llamar_api", "disparar_webhook", "llamar_orquestador"},
         "red": {"obtener_ip_local", "obtener_ip_publica"},
-        "voz": {"configurar_voz"},
         "general": set(),
     }
     return mapa.get(intencion, set())
@@ -2558,9 +2315,6 @@ def normalizar_propuesta_mejora_modelo(tipo, data, solicitud, motivo):
             "proveedor_ia",
             "modelo_online",
             "model",
-            "voz_activa",
-            "voz_style",
-            "voz_speed_label",
             "compact_window_size",
             "window_size",
         }
@@ -2659,7 +2413,6 @@ Herramientas disponibles:
 - disparar_webhook(nombre_evento, payload)
 - llamar_orquestador(accion, payload)
 - organizar_carpeta(path, excluir_ext)
-- configurar_voz(estilo, velocidad, volumen, genero)
 - ejecutar_cmd(cmd)
 
     Reglas estrictas:
@@ -2745,8 +2498,6 @@ def ejecutar_acciones(lista):
             r = llamar_orquestador(**args)
         elif accion == "organizar_carpeta":
             r = organizar_carpeta(**args)
-        elif accion == "configurar_voz":
-            r = configurar_voz(**args)
         elif accion == "ejecutar_cmd":
             r = ejecutar_cmd(**args)
         else:
@@ -2773,18 +2524,6 @@ def cerrar_app():
 
 # La interfaz se crea de forma explícita en configurar_interfaz().
 
-
-def on_voice_ui_change(_event=None):
-    msg = aplicar_ajuste_voz_ui(
-        style_label=voz_style_var.get(),
-        speed_label=voz_speed_var.get(),
-    )
-    estado_var.set("Voz actualizada")
-    guardar_config(CONFIG)
-    chat_window.after(1200, lambda: estado_var.set("Listo"))
-    return msg
-
-
 def on_provider_change(_event=None):
     CONFIG["proveedor_ia"] = normalizar_proveedor_ia(provider_var.get())
     CONFIG["modelo_online"] = online_model_var.get()
@@ -2792,15 +2531,6 @@ def on_provider_change(_event=None):
     actualizar_resumen_visual()
     estado_var.set(f"Proveedor fijo: {proveedor_ui_value(CONFIG['proveedor_ia'])}")
     chat_window.after(1200, lambda: estado_var.set("Listo"))
-
-
-def on_toggle_voz():
-    CONFIG["voz_activa"] = bool(voz_var.get())
-    guardar_config(CONFIG)
-    if CONFIG["voz_activa"]:
-        set_tts_status("🛑 silencio")
-    else:
-        set_tts_status("🔇 voz desactivada")
 
 
 def alternar_compacto():
@@ -2821,7 +2551,6 @@ def guardar_preferencias():
     CONFIG["model"] = model_var.get()
     CONFIG["proveedor_ia"] = normalizar_proveedor_ia(provider_var.get())
     CONFIG["modelo_online"] = online_model_var.get()
-    CONFIG["voz_activa"] = bool(voz_var.get())
     CONFIG["usar_habilidades_auto"] = bool(skills_auto_var.get())
     CONFIG["usar_objetivos_inteligentes"] = bool(objectives_var.get())
     CONFIG["window_size"] = chat_window.geometry().split("+")[0]
@@ -2829,10 +2558,6 @@ def guardar_preferencias():
     CONFIG["window_y"] = chat_window.winfo_y()
     guardar_config(CONFIG)
     estado_var.set("Guardado")
-    if not CONFIG["voz_activa"]:
-        set_tts_status("🔇 voz desactivada")
-    else:
-        set_tts_status("🛑 silencio")
     chat_window.after(1200, lambda: estado_var.set("Listo"))
 
 
@@ -3759,18 +3484,10 @@ def sincronizar_ui_desde_config():
         model_var.set(CONFIG.get("model", "qwen2.5:7b"))
     if online_model_var is not None:
         online_model_var.set(CONFIG.get("modelo_online", "llama-3.1-8b-instant"))
-    if voz_var is not None:
-        voz_var.set(bool(CONFIG.get("voz_activa", True)))
-    if voz_style_var is not None:
-        voz_style_var.set(CONFIG.get("voz_style", "Natural"))
-    if voz_speed_var is not None:
-        voz_speed_var.set(CONFIG.get("voz_speed_label", "Normal"))
     if skills_auto_var is not None:
         skills_auto_var.set(bool(CONFIG.get("usar_habilidades_auto", False)))
     if objectives_var is not None:
         objectives_var.set(bool(CONFIG.get("usar_objetivos_inteligentes", True)))
-    if mic_var is not None:
-        mic_var.set(CONFIG.get("voz_entrada_microfono", mic_var.get()))
     actualizar_resumen_visual()
 
 
@@ -4166,46 +3883,6 @@ def acciones_locales_desde_texto(texto):
             }
         ]
 
-    if any(k in t for k in ("voz", "tono", "habla")) and any(
-        k in t for k in ("mas", "más", "pon", "cambia", "quiero")
-    ):
-        args = {}
-        if any(k in t for k in ("femenina", "mujer")):
-            args["genero"] = "femenina"
-        elif any(k in t for k in ("masculina", "hombre")):
-            args["genero"] = "masculina"
-
-        if any(k in t for k in ("suave", "calida", "cálida")):
-            args["estilo"] = "suave"
-        elif any(k in t for k in ("grave", "profunda")):
-            args["estilo"] = "grave"
-
-        if "rápida" in t or "rapida" in t:
-            args["velocidad"] = 220
-        elif "lenta" in t:
-            args["velocidad"] = 150
-
-        m_vol = re.search(r"(volumen|volume)\s*(\d{1,3})", t)
-        if m_vol:
-            args["volumen"] = int(m_vol.group(2))
-
-        if args:
-            return [{"accion": "configurar_voz", "args": args}]
-
-    if any(k in t for k in ("microfono", "micrófono", "mic", "escucha")) and any(
-        k in t for k in ("encendido", "activar", "prender", "on")
-    ):
-        CONFIG["voz_entrada_activa"] = True
-        guardar_config(CONFIG)
-        return []
-
-    if any(k in t for k in ("microfono", "micrófono", "mic", "escucha")) and any(
-        k in t for k in ("apagar", "off", "desactivar")
-    ):
-        CONFIG["voz_entrada_activa"] = False
-        guardar_config(CONFIG)
-        return []
-
     return []
 
 
@@ -4288,7 +3965,6 @@ Acciones permitidas:
 - llamar_orquestador(accion, payload)
 - organizar_carpeta(path, excluir_ext)
 - vaciar_carpeta(path)
-- configurar_voz(estilo, velocidad, volumen, genero)
 - ejecutar_cmd(cmd)
 
 Historial:
@@ -4553,7 +4229,7 @@ def procesar_prompt_sync(texto):
     if not tipo_tiempo and acciones:
         acciones = [a for a in acciones if a.get("accion") != "obtener_hora"]
 
-    if intencion in ("archivos", "api", "voz", "general") and acciones:
+    if intencion in ("archivos", "api", "general") and acciones:
         acciones = [a for a in acciones if a.get("accion") not in ("obtener_ip_local", "obtener_ip_publica")]
 
     resultados = ejecutar_acciones(acciones)
@@ -4612,8 +4288,6 @@ def _procesar_mensaje(texto):
     def _post():
         mensaje(respuesta_final, "ia")
         estado_var.set("Listo")
-        if CONFIG.get("voz_activa", True):
-            hablar_garantizado(respuesta_final)
 
     chat_window.after(0, _post)
 
@@ -4642,83 +4316,6 @@ def enviar(event=None):
     return "break" if event is not None else None
 
 
-def escuchar_y_enviar():
-    global escucha_activa
-    if sr is None:
-        estado_var.set("Falta SpeechRecognition en este entorno.")
-        chat_window.after(2200, lambda: estado_var.set("Listo"))
-        return
-    if escucha_activa:
-        return
-    if not CONFIG.get("voz_entrada_activa", True):
-        estado_var.set("Micrófono desactivado")
-        chat_window.after(1500, lambda: estado_var.set("Listo"))
-        return
-
-    escucha_activa = True
-    estado_var.set("Escuchando...")
-    btn_micro.configure(text="Escuchando...", state="disabled")
-
-    def _run():
-        global escucha_activa
-        r = sr.Recognizer()
-        texto = ""
-        error = None
-        try:
-            mic_nombre = mic_var.get().strip()
-            mic_index = None
-            nombres = listar_microfonos()
-            if mic_nombre and mic_nombre in nombres:
-                mic_index = nombres.index(mic_nombre)
-            if mic_nombre and mic_index is None:
-                raise RuntimeError(f"Micrófono no encontrado: {mic_nombre}")
-
-            with sr.Microphone(device_index=mic_index) as source:
-                r.adjust_for_ambient_noise(source, duration=0.5)
-                audio = r.listen(source, timeout=8, phrase_time_limit=14)
-            idioma = CONFIG.get("voz_entrada_idioma", "es-ES")
-            texto = r.recognize_google(audio, language=idioma)
-        except sr.WaitTimeoutError:
-            error = "No detecté voz a tiempo."
-        except sr.UnknownValueError:
-            error = "No pude entender lo que dijiste."
-        except sr.RequestError as ex:
-            error = f"Error de reconocimiento: {ex}"
-        except Exception as ex:
-            error = f"Error con micrófono: {ex}"
-
-        def _post():
-            global escucha_activa
-            escucha_activa = False
-            btn_micro.configure(text="Hablar", state="normal")
-            if error:
-                estado_var.set(error)
-                chat_window.after(2200, lambda: estado_var.set("Listo"))
-                return
-
-            poner_texto_entrada(texto)
-            estado_var.set(f"Texto reconocido ({mic_var.get() or 'predeterminado'})")
-            chat_window.after(1200, lambda: estado_var.set("Listo"))
-            enviar()
-
-        chat_window.after(0, _post)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-def refrescar_microfonos():
-    nombres = listar_microfonos()
-    combo_mic.configure(values=nombres, state="readonly" if nombres else "disabled")
-    if nombres and mic_var.get() not in nombres:
-        mic_var.set(nombres[0])
-    CONFIG["voz_entrada_microfono"] = mic_var.get()
-    guardar_config(CONFIG)
-    estado_var.set("Micrófonos actualizados")
-    chat_window.after(1200, lambda: estado_var.set("Listo"))
-def on_mic_change(_event=None):
-    CONFIG["voz_entrada_microfono"] = mic_var.get()
-    guardar_config(CONFIG)
-
-
 def configurar_interfaz():
     global root
     global chat_window
@@ -4729,22 +4326,12 @@ def configurar_interfaz():
     global hero_subtitle_var
     global provider_badge_var
     global provider_badge
-    global tts_status_var
-    global tts_estado
     global model_var
     global combo_model
     global provider_var
     global combo_provider
     global online_model_var
     global combo_online_model
-    global mic_var
-    global combo_mic
-    global voz_style_var
-    global combo_voz_style
-    global voz_speed_var
-    global combo_voz_speed
-    global voz_var
-    global chk_voz
     global skills_auto_var
     global chk_skills_auto
     global objectives_var
@@ -4765,8 +4352,6 @@ def configurar_interfaz():
     global frame_input
     global entrada
     global btn_limpiar
-    global btn_micro
-    global btn_refresh_mic
     global btn_enviar
     global chat_compacto
     global auto_compact_job
@@ -4908,16 +4493,6 @@ def configurar_interfaz():
         font=("Segoe UI Semibold", 9),
     ).pack(anchor="e", pady=(8, 4))
 
-    tts_status_var = tk.StringVar(value="🛑 silencio")
-    tts_estado = tk.Label(
-        right_col,
-        textvariable=tts_status_var,
-        bg="#0f172a",
-        fg="#60a5fa",
-        font=("Segoe UI", 9),
-    )
-    tts_estado.pack(anchor="e")
-
     action_row = tk.Frame(header, bg="#0f172a")
     action_row.pack(fill="x", pady=(16, 0))
 
@@ -5012,79 +4587,6 @@ def configurar_interfaz():
         state="readonly",
     )
     combo_online_model.pack(side="left", fill="x", expand=True)
-
-    row_voice = tk.Frame(settings_panel, bg="#111827")
-    row_voice.pack(fill="x", pady=(0, 10))
-    tk.Label(
-        row_voice,
-        text="Voz",
-        width=16,
-        anchor="w",
-        bg="#111827",
-        fg="#cbd5e1",
-        font=("Segoe UI Semibold", 9),
-    ).pack(side="left")
-    voz_var = tk.BooleanVar(value=CONFIG["voz_activa"])
-    chk_voz = tk.Checkbutton(
-        row_voice,
-        text="Activada",
-        variable=voz_var,
-        command=on_toggle_voz,
-        bg="#111827",
-        fg="#cbd5e1",
-        selectcolor="#1f2937",
-        activebackground="#111827",
-        activeforeground="#cbd5e1",
-        font=("Segoe UI", 9),
-    )
-    chk_voz.pack(side="left", padx=(0, 10))
-
-    voz_style_var = tk.StringVar(value=CONFIG.get("voz_style", "Natural"))
-    combo_voz_style = ttk.Combobox(
-        row_voice,
-        textvariable=voz_style_var,
-        values=["Natural", "Suave", "Profunda", "Femenina", "Masculina"],
-        width=14,
-        state="readonly",
-    )
-    combo_voz_style.pack(side="left", padx=(0, 8))
-
-    voz_speed_var = tk.StringVar(value=CONFIG.get("voz_speed_label", "Normal"))
-    combo_voz_speed = ttk.Combobox(
-        row_voice,
-        textvariable=voz_speed_var,
-        values=["Lenta", "Normal", "Rápida"],
-        width=12,
-        state="readonly",
-    )
-    combo_voz_speed.pack(side="left")
-
-    row_mic = tk.Frame(settings_panel, bg="#111827")
-    row_mic.pack(fill="x", pady=(0, 10))
-    tk.Label(
-        row_mic,
-        text="Micrófono",
-        width=16,
-        anchor="w",
-        bg="#111827",
-        fg="#cbd5e1",
-        font=("Segoe UI Semibold", 9),
-    ).pack(side="left")
-    mic_names = listar_microfonos()
-    mic_var = tk.StringVar(value=CONFIG.get("voz_entrada_microfono", ""))
-    combo_mic = ttk.Combobox(
-        row_mic,
-        textvariable=mic_var,
-        values=mic_names,
-        width=34,
-        state="readonly" if mic_names else "disabled",
-    )
-    if not mic_var.get() and mic_names:
-        mic_var.set(mic_names[0])
-    combo_mic.pack(side="left", fill="x", expand=True)
-
-    btn_refresh_mic = make_button(row_mic, "Actualizar", refrescar_microfonos, padx=10)
-    btn_refresh_mic.pack(side="left", padx=(8, 0))
 
     row_learning = tk.Frame(settings_panel, bg="#111827")
     row_learning.pack(fill="x", pady=(0, 10))
@@ -5228,20 +4730,14 @@ def configurar_interfaz():
     btn_limpiar = make_button(composer_actions, "Limpiar", limpiar_historial, padx=10)
     btn_limpiar.pack(side="left")
 
-    btn_micro = make_button(composer_actions, "Hablar", escuchar_y_enviar, padx=10)
-    btn_micro.pack(side="left", padx=(8, 0))
-
     btn_enviar = make_button(composer_actions, "Enviar", enviar, variant="primary", padx=16)
     btn_enviar.pack(side="right")
 
     entrada.bind("<Return>", on_textbox_return)
     entrada.bind("<Shift-Return>", on_textbox_shift_return)
     combo_model.bind("<<ComboboxSelected>>", on_model_change)
-    combo_voz_style.bind("<<ComboboxSelected>>", on_voice_ui_change)
-    combo_voz_speed.bind("<<ComboboxSelected>>", on_voice_ui_change)
     combo_provider.bind("<<ComboboxSelected>>", on_provider_change)
     combo_online_model.bind("<<ComboboxSelected>>", on_online_model_change)
-    combo_mic.bind("<<ComboboxSelected>>", on_mic_change)
     chat_window.bind("<FocusIn>", lambda e: expandir_si_compacto())
     chat_window.bind("<Configure>", lambda e: guardar_geometria_actual())
     chat_window.protocol("WM_DELETE_WINDOW", cerrar_app)
